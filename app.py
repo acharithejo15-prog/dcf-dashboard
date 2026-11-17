@@ -1337,8 +1337,7 @@ tab_overview.__enter__()
 st.subheader("Historical free cash flow")
 fig_fcf = px.bar(x=fcf_hist.index.year, y=fcf_hist.values / 1e9, labels={"x": "Year", "y": "FCF ($B)"})
 fig_fcf.update_layout(height=320)
-st.plotly_chart(fig_fcf, use_container_width=True)
-
+st.plotly_chart(fig_px, use_container_width=True, key="sentiment_price_chart")
 with st.expander("How this model works"):
     st.markdown(
         """
