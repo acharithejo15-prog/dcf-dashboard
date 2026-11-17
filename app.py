@@ -1304,6 +1304,17 @@ This app uses the CAPM figure only (technically the *cost of equity*) to keep th
         "</div>",
         unsafe_allow_html=True,
     )
+    st.subheader("🧠 Test yourself")
+
+    q1 = st.radio(
+        "If you raise the discount rate (WACC), the fair value usually...",
+        ["Goes up", "Goes down", "Stays the same"], index=None, key="quiz1",
+    )
+    if q1:
+        if q1 == "Goes down":
+            st.success("Correct! A higher required return shrinks the value of all future cash flows.")
+        else:
+            st.error("Not quite. Try moving the WACC slider and watch the fair value.")
 # ---------------------------------------------------------------
 # 8. HISTORICAL FCF
 # ---------------------------------------------------------------
