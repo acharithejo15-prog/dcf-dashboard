@@ -122,7 +122,33 @@ st.caption("Live data from Yahoo Finance. For educational purposes, not investme
 def load_data(ticker):
     t = yf.Ticker(ticker)
     return t.cashflow, t.info
+@st.cache_data(ttl=3600)
+def get_ttm_eps(ticker_symbol):
+    try:
+        stock = yf.Ticker(ticker_symbol)
+        quarterly = stock.quarterly_income_stmt
 
+        if quarterly is None or quarterly.empty:
+            return None
+
+        eps_row = None
+        for row in ["Diluted EPS", "Basic EPS"]:
+            if row in quarterly.index:
+                eps_row = row
+                break
+
+        if eps_row is None:
+            return None
+
+        eps_values = quarterly.loc[eps_row].dropna()
+
+        if len(eps_values) < 4:
+            return None
+
+        return float(eps_values.iloc[:4].sum())
+
+    except Exception:
+        return None
 
 @st.cache_data(ttl=3600)
 def get_risk_free_rate():
@@ -838,57 +864,97 @@ else:
         hide_index=True,
         use_container_width=True,
     )
-    # ---------- P/E and EPS ----------
-    def _num(x):
-        """Return a clean number, or None if the value is missing or blank."""
-        try:
-            x = float(x)
-            return x if np.isfinite(x) else None
-        except (TypeError, ValueError):
-            return None
+   
+# ---------- IMPROVED P/E AND EPS CALCULATIONS ----------
 
-    pe_t = _num(info.get("trailingPE"))
-    pe_f = _num(info.get("forwardPE"))
-    eps_t = _num(info.get("trailingEps"))
-    eps_f = _num(info.get("forwardEps"))
+def clean_num(value):
+    """Convert Yahoo Finance data into a valid number."""
+    try:
+        value = float(value)
+        return value if np.isfinite(value) else None
+    except (TypeError, ValueError):
+        return None
 
-    st.markdown("**Earnings and valuation multiples**")
-    e1, e2, e3, e4 = st.columns(4)
-    e1.metric(
-        "P/E ratio (trailing)", f"{pe_t:.1f}" if pe_t else "N/A",
-        help="Price divided by earnings per share over the last 12 months. It shows how many dollars investors pay for each $1 of yearly profit. A higher number means investors expect more growth, or the stock is expensive. Compare it to similar companies, not to every stock.",
-    )
-    e2.metric(
-        "P/E ratio (forward)", f"{pe_f:.1f}" if pe_f else "N/A",
-        help="Same idea, but using analysts' estimates of next year's earnings. If it is lower than the trailing P/E, analysts expect profits to grow.",
-    )
-    e3.metric(
-        "EPS (trailing)", f"${eps_t:,.2f}" if eps_t is not None else "N/A",
-        help="Earnings per share: the company's profit over the last 12 months divided by its number of shares. It is the profit that belongs to each share you own.",
-    )
-    e4.metric(
-        "EPS (forward estimate)", f"${eps_f:,.2f}" if eps_f is not None else "N/A",
-        help="What analysts expect each share to earn over the next 12 months.",
+
+# Retrieve Yahoo Finance values
+pe_t = clean_num(info.get("trailingPE"))
+pe_f = clean_num(info.get("forwardPE"))
+eps_t = clean_num(info.get("trailingEps"))
+eps_f = clean_num(info.get("forwardEps"))
+
+# BACKUP 1: Calculate trailing EPS from quarterly statements
+if eps_t is None:
+    eps_t = get_ttm_eps(ticker)
+
+# BACKUP 2: Calculate trailing P/E using current stock price
+if pe_t is None and eps_t is not None and eps_t > 0:
+    pe_t = price / eps_t
+
+# BACKUP 3: Calculate forward P/E if forward EPS exists
+if pe_f is None and eps_f is not None and eps_f > 0:
+    pe_f = price / eps_f
+
+# Display earnings metrics
+st.markdown("### Earnings and valuation multiples")
+
+e1, e2, e3, e4 = st.columns(4)
+
+# Trailing P/E
+if pe_t is not None and pe_t > 0:
+    pe_t_display = f"{pe_t:.2f}x"
+else:
+    pe_t_display = "N/M" if eps_t is not None and eps_t <= 0 else "N/A"
+
+# Forward P/E
+if pe_f is not None and pe_f > 0:
+    pe_f_display = f"{pe_f:.2f}x"
+else:
+    pe_f_display = "N/M" if eps_f is not None and eps_f <= 0 else "N/A"
+
+# Trailing EPS
+eps_t_display = (
+    f"${eps_t:,.2f}" if eps_t is not None else "N/A"
+)
+
+# Forward EPS
+eps_f_display = (
+    f"${eps_f:,.2f}" if eps_f is not None else "N/A"
+)
+
+e1.metric("P/E ratio (trailing)", pe_t_display)
+e2.metric("P/E ratio (forward)", pe_f_display)
+e3.metric("EPS (trailing)", eps_t_display)
+e4.metric("EPS (forward estimate)", eps_f_display)
+
+# Explain the results
+if eps_t is not None and eps_t > 0:
+    st.success(
+        f"Investors are paying ${pe_t:.2f} for every $1 "
+        f"of trailing annual earnings."
+        if pe_t is not None
+        else f"Trailing EPS is ${eps_t:.2f}."
     )
 
-    # Plain-English reading
-    notes = []
-    if pe_t:
-        notes.append(f"Investors are paying about **${pe_t:.0f}** for every **$1** of the company's yearly profit.")
-    if eps_t and eps_f and eps_t > 0:
-        g = eps_f / eps_t - 1
-        if g > 0.02:
-            notes.append(f"Analysts expect earnings per share to **grow about {g:.0%}** over the next year.")
-        elif g < -0.02:
-            notes.append(f"Analysts expect earnings per share to **fall about {abs(g):.0%}** over the next year.")
-        else:
-            notes.append("Analysts expect earnings per share to stay **roughly flat** over the next year.")
-    if eps_t is not None and eps_t <= 0:
-        notes.append("The company has **negative earnings** right now, so the P/E ratio is not meaningful.")
-    if notes:
-        st.markdown(" ".join(notes))
-    st.caption("P/E is best compared against similar companies in the same sector and against the company's own history. Data from Yahoo Finance and may be delayed.")
-    # Hype vs. valuation: the key insight
+elif eps_t is not None and eps_t <= 0:
+    st.warning(
+        "The company currently has zero or negative earnings. "
+        "A positive P/E ratio is not meaningful."
+    )
+
+if eps_t is not None and eps_f is not None and eps_t > 0:
+    earnings_growth = eps_f / eps_t - 1
+
+    st.write(
+        f"Expected EPS growth: {earnings_growth:+.2%}"
+    )
+
+st.caption(
+    "Trailing EPS uses the last 12 months of earnings. "
+    "Forward EPS uses analyst estimates when available. "
+    "P/E is calculated using current share price and EPS."
+)
+
+if signals:
     if fcf0 <= 0:
         v_text = "The DCF is not reliable for this company (negative free cash flow), so sentiment can't be compared to valuation."
         v_color = "#F5A623"
@@ -1036,3 +1102,4 @@ with st.expander("How this model works"):
         The Monte Carlo run repeats this thousands of times with randomized assumptions to show a range of outcomes.
         """
     )
+"""
