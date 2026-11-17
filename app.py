@@ -539,6 +539,7 @@ else:
 tab_overview, tab_learn, tab_risk, tab_sent = st.tabs(
     ["📊 Overview", "🎓 Learn", "🎲 Risk", "💬 Sentiment"]
 )
+tab_overview.__enter__()
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Current price", f"${price:,.2f}")
 c2.metric("DCF fair value", f"${fair_value:,.2f}")
@@ -767,7 +768,8 @@ fig_heat = px.imshow(
 )
 fig_heat.update_layout(height=420)
 st.plotly_chart(fig_heat, use_container_width=True)
-
+tab_overview.__exit__(None, None, None)
+tab_risk.__enter__()
 # ---------------------------------------------------------------
 # 7. RISK MODEL: Monte Carlo simulation
 # ---------------------------------------------------------------
@@ -822,6 +824,8 @@ fig_mc.add_vline(x=price, line_dash="dash", line_color="red", annotation_text="C
 fig_mc.add_vline(x=p50, line_color="black", annotation_text="Median")
 fig_mc.update_layout(height=380, showlegend=False)
 st.plotly_chart(fig_mc, use_container_width=True)
+tab_risk.__exit__(None, None, None)
+tab_sent.__enter__()
 # ---------------------------------------------------------------
 # 7b. MARKET SENTIMENT: what investors think
 # ---------------------------------------------------------------
@@ -1315,6 +1319,8 @@ This app uses the CAPM figure only (technically the *cost of equity*) to keep th
             st.success("Correct! A higher required return shrinks the value of all future cash flows.")
         else:
             st.error("Not quite. Try moving the WACC slider and watch the fair value.")
+            tab_learn.__exit__(None, None, None)
+tab_overview.__enter__()
 # ---------------------------------------------------------------
 # 8. HISTORICAL FCF
 # ---------------------------------------------------------------
@@ -1334,3 +1340,4 @@ with st.expander("How this model works"):
         The Monte Carlo run repeats this thousands of times with randomized assumptions to show a range of outcomes.
         """
     )
+tab_overview.__exit__(None, None, None)
