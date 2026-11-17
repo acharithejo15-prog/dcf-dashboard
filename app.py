@@ -172,8 +172,47 @@ def dcf_value(fcf0, growth, wacc, terminal_g, years, net_debt, shares):
 # 3. SIDEBAR INPUTS
 # ---------------------------------------------------------------
 st.sidebar.header("Inputs")
-ticker = st.sidebar.text_input("Ticker", "AAPL").upper().strip()
+# ---------------- Company search ----------------
+POPULAR = {
+    "apple": "AAPL", "microsoft": "MSFT", "google": "GOOGL", "alphabet": "GOOGL",
+    "amazon": "AMZN", "tesla": "TSLA", "nvidia": "NVDA", "meta": "META",
+    "facebook": "META", "netflix": "NFLX", "coca cola": "KO", "coca-cola": "KO",
+    "pepsi": "PEP", "walmart": "WMT", "nike": "NKE", "disney": "DIS",
+    "mcdonalds": "MCD", "mcdonald's": "MCD", "starbucks": "SBUX", "home depot": "HD",
+    "at&t": "T", "verizon": "VZ", "intel": "INTC", "amd": "AMD", "costco": "COST",
+}
 
+
+@st.cache_data(ttl=3600)
+def search_companies(query):
+    """Look up companies by name. Returns a list of (ticker, name, exchange)."""
+    out = []
+    try:
+        for r in yf.Search(query, max_results=10).quotes:
+            if r.get("quoteType") == "EQUITY" and r.get("symbol"):
+                name = r.get("longname") or r.get("shortname") or r["symbol"]
+                out.append((r["symbol"], name, r.get("exchDisp") or r.get("exchange") or ""))
+    except Exception:
+        pass
+    if not out and query.lower() in POPULAR:  # backup if the search service is unavailable
+        out.append((POPULAR[query.lower()], query.title(), ""))
+    return out
+
+
+query = st.sidebar.text_input(
+    "Search company or ticker", "Apple",
+    help="Type a company name like 'Coca Cola' or 'Nike', or a ticker like 'KO'. Then pick the right match from the list that appears.",
+).strip()
+
+ticker = "AAPL"
+matches = search_companies(query) if query else []
+if matches:
+    labels = [f"{n} ({s})" + (f" · {e}" if e else "") for s, n, e in matches]
+    pick = st.sidebar.selectbox("Select a match", labels)
+    ticker = matches[labels.index(pick)][0]
+elif query:
+    st.sidebar.warning("No company found by that name, so the app will try it as a ticker. Check the spelling or try a different name.")
+    ticker = query.upper()
 try:
     cf, info = load_data(ticker)
     fcf_hist = get_fcf_history(cf)
