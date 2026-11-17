@@ -878,9 +878,16 @@ def clean_num(value):
 
 # Retrieve Yahoo Finance values
 pe_t = clean_num(info.get("trailingPE"))
-pe_f = clean_num(info.get("forwardPE"))
 eps_t = clean_num(info.get("trailingEps"))
-eps_f = clean_num(info.get("forwardEps"))
+
+# Retrieve forward estimates from Yahoo Finance
+try:
+    stock = yf.Ticker(ticker)
+    eps_f = clean_num(stock.info.get("forwardEps"))
+    pe_f = clean_num(stock.info.get("forwardPE"))
+except Exception:
+    eps_f = None
+    pe_f = None
 st.write("DEBUG - Yahoo Finance Forward Data")
 st.write("Ticker:", ticker)
 st.write("Forward EPS:", info.get("forwardEps"))
