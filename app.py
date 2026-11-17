@@ -895,6 +895,89 @@ else:
         fig_px.add_hline(y=fair_value, line_dash="dash", line_color="#00C48C", annotation_text="DCF fair value")
         fig_px.update_layout(title="1-year price vs. DCF fair value", yaxis_title="$ per share", height=360, template="plotly_dark")
         st.plotly_chart(fig_px, use_container_width=True)
+        # ---------------------------------------------------------------
+# COMBINED MODEL SIGNAL (pop-up)
+# ---------------------------------------------------------------
+_hype = locals().get("hype_score")   # sentiment score, may be missing for some tickers
+_vol = locals().get("vol")           # volatility, may be missing
+
+components = []  # (name, score from -1 to +1, weight, reading)
+if fcf0 > 0:
+    components.append(("DCF valuation gap", float(np.clip(upside / 0.40, -1, 1)), 0.50, f"{upside:+.0%} vs. fair value"))
+    components.append(("Monte Carlo odds", float(np.clip((prob_undervalued - 0.5) * 2, -1, 1)), 0.25, f"{prob_undervalued:.0%} of runs above price"))
+if _hype is not None and np.isfinite(_hype):
+    components.append(("Investor sentiment", float(np.clip((_hype - 50) / 50, -1, 1)), 0.25, f"hype score {_hype:.0f}/100"))
+
+if fcf0 <= 0 or not components:
+    sig, sig_color, sig_icon = "NOT RATED", "#F5A623", "⚠️"
+    total = None
+else:
+    wsum = sum(c[2] for c in components)
+    total = sum(c[1] * c[2] for c in components) / wsum   # -1 to +1
+    if total >= 0.30:
+        sig, sig_color, sig_icon = "BUY", "#00C48C", "🟢"
+    elif total <= -0.30:
+        sig, sig_color, sig_icon = "SELL", "#FF4B4B", "🔴"
+    else:
+        sig, sig_color, sig_icon = "HOLD", "#4facfe", "🟡"
+
+
+def signal_content():
+    if total is None:
+        st.markdown(
+            '<div style="font-size:1.6rem; font-weight:800; color:#F5A623;">⚠️ NOT RATED</div>'
+            '<div style="margin-top:6px;">This company has negative free cash flow or too little data, so the model cannot give a reliable signal.</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        pct = int((total + 1) / 2 * 100)  # 0 to 100 for the meter
+        st.markdown(
+            f'<div style="text-align:center; font-size:2.2rem; font-weight:800; color:{sig_color};">{sig_icon} {sig}</div>'
+            f'<div style="text-align:center; color:#9AA4B2; font-size:0.9rem; margin-bottom:10px;">Model signal for {ticker}</div>'
+            '<div style="background:linear-gradient(90deg,#FF4B4B,#4facfe,#00C48C); height:10px; border-radius:6px; position:relative; margin:8px 0 4px 0;">'
+            f'<div style="position:absolute; left:{pct}%; top:-5px; width:4px; height:20px; background:#FAFAFA; border-radius:2px;"></div></div>'
+            '<div style="display:flex; justify-content:space-between; font-size:0.75rem; color:#9AA4B2;"><span>SELL</span><span>HOLD</span><span>BUY</span></div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown("**What went into it**")
+        wsum_ = sum(c[2] for c in components)
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "Factor": n,
+                        "Reading": r,
+                        "Leaning": "Positive" if s > 0.15 else ("Negative" if s < -0.15 else "Neutral"),
+                        "Weight": f"{w / wsum_:.0%}",
+                    }
+                    for n, s, w, r in components
+                ]
+            ),
+            hide_index=True, use_container_width=True,
+        )
+        if _vol is not None and _vol >= 0.35:
+            st.warning(f"⚡ This stock is highly volatile (about {_vol:.0%} per year). Prices can move sharply whatever the signal says.")
+    st.caption(
+        "Educational model output built from the DCF, Monte Carlo simulation, and market sentiment, using the assumptions in the sidebar. "
+        "It is not personalized investment advice and does not guarantee results. Do your own research before making any investment decision."
+    )
+
+
+st.subheader(
+    "Combined model signal",
+    help="Blends three things into one reading: how the DCF fair value compares to the price (50%), how often the Monte Carlo simulation puts fair value above the price (25%), and how optimistic investors are (25%). BUY means most of them lean positive, SELL means most lean negative, and HOLD means they are mixed or close to neutral. It changes whenever you change the sidebar assumptions.",
+)
+
+if hasattr(st, "dialog"):
+    @st.dialog(f"Model signal: {ticker}")
+    def show_signal():
+        signal_content()
+
+    if st.button(f"{sig_icon} Show model signal", type="primary"):
+        show_signal()
+else:
+    with st.expander(f"{sig_icon} Show model signal"):
+        signal_content()
 # ---------------------------------------------------------------
 # 8. HISTORICAL FCF
 # ---------------------------------------------------------------
