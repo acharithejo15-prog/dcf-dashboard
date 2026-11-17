@@ -881,7 +881,13 @@ pe_t = clean_num(info.get("trailingPE"))
 pe_f = clean_num(info.get("forwardPE"))
 eps_t = clean_num(info.get("trailingEps"))
 eps_f = clean_num(info.get("forwardEps"))
-
+st.write("DEBUG - Yahoo Finance Forward Data")
+st.write("Ticker:", ticker)
+st.write("Forward EPS:", info.get("forwardEps"))
+st.write("Forward P/E:", info.get("forwardPE"))
+st.write("Available forward-related keys:", {
+    k: v for k, v in info.items() if "forward" in k.lower()
+})
 # BACKUP 1: Calculate trailing EPS from quarterly statements
 if eps_t is None:
     eps_t = get_ttm_eps(ticker)
@@ -1102,4 +1108,3 @@ with st.expander("How this model works"):
         The Monte Carlo run repeats this thousands of times with randomized assumptions to show a range of outcomes.
         """
     )
-
