@@ -384,7 +384,12 @@ else:
     fig_price = go.Figure()
     if chart_type == "Line":
         fig_price.add_trace(
-            go.Scatter(x=px_data.index, y=px_data["Close"], mode="lines", name="Price", line=dict(color=line_color, width=2))
+            go.Scatter(
+                x=px_data.index, y=px_data["Close"], mode="lines", name="Price",
+                line=dict(color=line_color, width=2),
+                fill="tozeroy", fillcolor="rgba(0,196,140,0.06)" if change >= 0 else "rgba(255,75,75,0.06)",
+                hovertemplate="$%{y:,.2f}<extra></extra>",
+            )
         )
     else:
         fig_price.add_trace(
@@ -399,11 +404,26 @@ else:
 
     if choice != "1D":
         fig_price.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])  # hide weekend gaps
-    fig_price.update_layout(
-        height=420, template="plotly_dark", yaxis_title="$ per share",
-        xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=10, b=10),
+
+    hover_fmt = "%b %d, %I:%M %p" if choice in ("1D", "1W") else "%b %d, %Y"
+    fig_price.update_xaxes(
+        showspikes=True, spikemode="across", spikethickness=1, spikedash="dot",
+        spikecolor="#9AA4B2", spikesnap="cursor", hoverformat=hover_fmt, fixedrange=True,
     )
-    st.plotly_chart(fig_price, use_container_width=True)
+    fig_price.update_yaxes(
+        showspikes=True, spikemode="across", spikethickness=1, spikedash="dot",
+        spikecolor="#9AA4B2", spikesnap="cursor", fixedrange=True, tickprefix="$",
+    )
+    fig_price.update_layout(
+        height=420, template="plotly_dark",
+        hovermode="x unified", dragmode=False,
+        xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=10, b=10),
+        hoverlabel=dict(bgcolor="#1A1F2B", font_size=13),
+    )
+    st.plotly_chart(
+        fig_price, use_container_width=True,
+        config={"displayModeBar": False, "scrollZoom": False, "doubleClick": False},
+    )
     # ---------------------------------------------------------------
 # LATEST NEWS
 # ---------------------------------------------------------------
