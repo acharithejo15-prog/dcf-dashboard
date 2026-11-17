@@ -888,13 +888,17 @@ try:
 except Exception:
     eps_f = None
     pe_f = None
-st.write("DEBUG - Yahoo Finance Forward Data")
-st.write("Ticker:", ticker)
-st.write("Forward EPS:", info.get("forwardEps"))
-st.write("Forward P/E:", info.get("forwardPE"))
-st.write("Available forward-related keys:", {
-    k: v for k, v in info.items() if "forward" in k.lower()
-})
+# Retrieve forward estimates from Yahoo Finance
+eps_f = clean_num(info.get("forwardEps"))
+pe_f = clean_num(info.get("forwardPE"))
+
+# Fallback: analyst consensus for next year, if Yahoo's main field is empty
+if eps_f is None:
+    try:
+        est = yf.Ticker(ticker).earnings_estimate
+        eps_f = clean_num(est.loc["+1y", "avg"])
+    except Exception:
+        eps_f = None
 # BACKUP 1: Calculate trailing EPS from quarterly statements
 if eps_t is None:
     eps_t = get_ttm_eps(ticker)
@@ -1014,88 +1018,240 @@ if signals:
         fig_px.update_layout(title="1-year price vs. DCF fair value", yaxis_title="$ per share", height=360, template="plotly_dark")
         st.plotly_chart(fig_px, use_container_width=True)
         # ---------------------------------------------------------------
-# COMBINED MODEL SIGNAL (pop-up)
 # ---------------------------------------------------------------
-_hype = locals().get("hype_score")   # sentiment score, may be missing for some tickers
-_vol = locals().get("vol")           # volatility, may be missing
-
-components = []  # (name, score from -1 to +1, weight, reading)
-if fcf0 > 0:
-    components.append(("DCF valuation gap", float(np.clip(upside / 0.40, -1, 1)), 0.50, f"{upside:+.0%} vs. fair value"))
-    components.append(("Monte Carlo odds", float(np.clip((prob_undervalued - 0.5) * 2, -1, 1)), 0.25, f"{prob_undervalued:.0%} of runs above price"))
-if _hype is not None and np.isfinite(_hype):
-    components.append(("Investor sentiment", float(np.clip((_hype - 50) / 50, -1, 1)), 0.25, f"hype score {_hype:.0f}/100"))
-
-if fcf0 <= 0 or not components:
-    sig, sig_color, sig_icon = "NOT RATED", "#F5A623", "⚠️"
-    total = None
-else:
-    wsum = sum(c[2] for c in components)
-    total = sum(c[1] * c[2] for c in components) / wsum   # -1 to +1
-    if total >= 0.30:
-        sig, sig_color, sig_icon = "BUY", "#00C48C", "🟢"
-    elif total <= -0.30:
-        sig, sig_color, sig_icon = "SELL", "#FF4B4B", "🔴"
-    else:
-        sig, sig_color, sig_icon = "HOLD", "#4facfe", "🟡"
+# LEARN: why is this stock valued this way?
+# ---------------------------------------------------------------
+def money(x):
+    return f"\\${x:,.2f}"  # escaped so Streamlit doesn't treat $ as math
 
 
-def signal_content():
-    if total is None:
-        st.markdown(
-            '<div style="font-size:1.6rem; font-weight:800; color:#F5A623;">⚠️ NOT RATED</div>'
-            '<div style="margin-top:6px;">This company has negative free cash flow or too little data, so the model cannot give a reliable signal.</div>',
-            unsafe_allow_html=True,
-        )
-    else:
-        pct = int((total + 1) / 2 * 100)  # 0 to 100 for the meter
-        st.markdown(
-            f'<div style="text-align:center; font-size:2.2rem; font-weight:800; color:{sig_color};">{sig_icon} {sig}</div>'
-            f'<div style="text-align:center; color:#9AA4B2; font-size:0.9rem; margin-bottom:10px;">Model signal for {ticker}</div>'
-            '<div style="background:linear-gradient(90deg,#FF4B4B,#4facfe,#00C48C); height:10px; border-radius:6px; position:relative; margin:8px 0 4px 0;">'
-            f'<div style="position:absolute; left:{pct}%; top:-5px; width:4px; height:20px; background:#FAFAFA; border-radius:2px;"></div></div>'
-            '<div style="display:flex; justify-content:space-between; font-size:0.75rem; color:#9AA4B2;"><span>SELL</span><span>HOLD</span><span>BUY</span></div>',
-            unsafe_allow_html=True,
-        )
-        st.markdown("**What went into it**")
-        wsum_ = sum(c[2] for c in components)
-        st.dataframe(
-            pd.DataFrame(
-                [
-                    {
-                        "Factor": n,
-                        "Reading": r,
-                        "Leaning": "Positive" if s > 0.15 else ("Negative" if s < -0.15 else "Neutral"),
-                        "Weight": f"{w / wsum_:.0%}",
-                    }
-                    for n, s, w, r in components
-                ]
-            ),
-            hide_index=True, use_container_width=True,
-        )
-        if _vol is not None and _vol >= 0.35:
-            st.warning(f"⚡ This stock is highly volatile (about {_vol:.0%} per year). Prices can move sharply whatever the signal says.")
-    st.caption(
-        "Educational model output built from the DCF, Monte Carlo simulation, and market sentiment, using the assumptions in the sidebar. "
-        "It is not personalized investment advice and does not guarantee results. Do your own research before making any investment decision."
-    )
+def dcf_breakdown(fcf0, growth, wacc, terminal_g, years):
+    """Splits enterprise value into 'next few years of cash' vs. 'everything after'."""
+    flows, fcf = [], fcf0
+    for t in range(1, years + 1):
+        g_t = growth + (terminal_g - growth) * (t - 1) / max(years - 1, 1)
+        fcf *= 1 + g_t
+        flows.append(fcf)
+    pv_flows = sum(f / (1 + wacc) ** t for t, f in enumerate(flows, start=1))
+    tv = flows[-1] * (1 + terminal_g) / (wacc - terminal_g)
+    pv_tv = tv / (1 + wacc) ** years
+    return pv_flows, pv_tv
 
 
-st.subheader(
-    "Combined model signal",
-    help="Blends three things into one reading: how the DCF fair value compares to the price (50%), how often the Monte Carlo simulation puts fair value above the price (25%), and how optimistic investors are (25%). BUY means most of them lean positive, SELL means most lean negative, and HOLD means they are mixed or close to neutral. It changes whenever you change the sidebar assumptions.",
+def implied_growth(target_price):
+    """Reverse DCF: what year-1 growth would justify today's price? (bisection)"""
+    lo, hi = -0.30, 0.60
+    if not (dcf_value(fcf0, lo, wacc, terminal_g, years, net_debt, shares)
+            <= target_price
+            <= dcf_value(fcf0, hi, wacc, terminal_g, years, net_debt, shares)):
+        return None
+    for _ in range(60):
+        mid = (lo + hi) / 2
+        if dcf_value(fcf0, mid, wacc, terminal_g, years, net_debt, shares) < target_price:
+            lo = mid
+        else:
+            hi = mid
+    return (lo + hi) / 2
+
+
+st.header(
+    "Learn: why is this stock valued this way?",
+    help="This section explains the reasoning behind the number, not just the number. Change the sidebar assumptions and watch the explanations update.",
 )
 
-if hasattr(st, "dialog"):
-    @st.dialog(f"Model signal: {ticker}")
-    def show_signal():
-        signal_content()
-
-    if st.button(f"{sig_icon} Show model signal", type="primary"):
-        show_signal()
+if fcf0 <= 0:
+    st.info(
+        "This company has negative free cash flow, so a DCF can't value it well. "
+        "That is a lesson in itself: a DCF only works for businesses whose cash flows can be "
+        "reasonably forecast. Young or unprofitable companies are usually valued on other things, "
+        "like revenue growth or future potential."
+    )
 else:
-    with st.expander(f"{sig_icon} Show model signal"):
-        signal_content()
+    pv_flows, pv_tv = dcf_breakdown(fcf0, growth, wacc, terminal_g, years)
+    ev = pv_flows + pv_tv
+    tv_share = pv_tv / ev
+    imp_g = implied_growth(price)
+    cost_of_equity = rf + beta * 0.05
+
+    tab1, tab2, tab3, tab4 = st.tabs(
+        ["📖 The big picture", "🧩 Where the value comes from", "🔍 What the market is assuming", "📚 Glossary"]
+    )
+
+    # ---- Tab 1: the story ----
+    with tab1:
+        st.markdown(
+            f"""
+**The core idea:** a company is worth the cash it will hand to its owners over its lifetime,
+adjusted for the fact that money received later is worth less than money received today.
+
+For **{info.get('longName', ticker)}**, this model does the following:
+
+1. **Starts with real cash.** The company generates about **{money(fcf0 / 1e9)}B** of free cash flow per year
+   (cash left over after running the business and paying for equipment and buildings).
+2. **Guesses how it grows.** You assumed **{growth:.1%}** growth in year 1, fading toward **{terminal_g:.2%}**
+   by year {years}. A fast grower slows down eventually, because no company can outgrow the economy forever.
+3. **Shrinks future cash back to today's money.** Using a discount rate of **{wacc:.1%}**, a dollar received in
+   year {years} is only worth about **{money(1 / (1 + wacc) ** years)}** today.
+4. **Adds a "forever" value.** After year {years}, the company keeps earning, so the model adds a terminal value for all those later years.
+5. **Subtracts debt and divides by shares.** The owners only get what is left after debt is paid, split across **{shares / 1e9:,.2f}B** shares.
+
+**Result: {money(fair_value)} per share, compared with a market price of {money(price)}.**
+"""
+        )
+        if upside > 0.15:
+            st.markdown(
+                f"The model's value is **{upside:.0%} above** the price. That means the market is assuming "
+                "*less* growth, or a *higher* discount rate, than you chose. Either the market is "
+                "being too cautious, or **your assumptions are too optimistic.** A good analyst asks both questions."
+            )
+        elif upside < -0.15:
+            st.markdown(
+                f"The model's value is **{abs(upside):.0%} below** the price. That means the market is assuming "
+                "*more* growth, or a *lower* discount rate, than you chose. Either the market is being "
+                "too hopeful, or **your assumptions are too pessimistic** (or the company has strengths a cash flow model doesn't capture, like a strong brand)."
+            )
+        else:
+            st.markdown(
+                "The model's value is close to the market price, so your assumptions are roughly **in line with what the market is assuming.**"
+            )
+        st.caption(
+            "A DCF is only as good as its inputs. It shows what *must be true* for a price to make sense. It doesn't tell you what will happen."
+        )
+
+    # ---- Tab 2: where value comes from ----
+    with tab2:
+        st.markdown(
+            "Here is how much of the company's value comes from **cash in the next "
+            f"{years} years** versus **everything after that** (the terminal value)."
+        )
+        fig_src = go.Figure(
+            go.Bar(
+                x=[f"Cash flows, years 1-{years}", "Terminal value (after that)"],
+                y=[pv_flows / 1e9, pv_tv / 1e9],
+                marker_color=["#4facfe", "#00C48C"],
+                text=[f"{money(pv_flows / 1e9)}B", f"{money(pv_tv / 1e9)}B"],
+                textposition="auto",
+            )
+        )
+        fig_src.update_layout(
+            height=320, template="plotly_dark", yaxis_title="Present value ($B)",
+            margin=dict(l=10, r=10, t=10, b=10),
+        )
+        st.plotly_chart(fig_src, use_container_width=True)
+
+        st.markdown(
+            f"**{tv_share:.0%} of this company's value comes from the terminal value.** "
+            "That is typical for a DCF, and it is the model's biggest weakness: most of the answer "
+            "depends on a guess about the distant future. This is why the sensitivity heatmap above "
+            "matters so much."
+        )
+
+        st.markdown("**From company value to price per share:**")
+        bridge = pd.DataFrame(
+            [
+                {"Step": "Enterprise value (PV of all future cash)", "Amount": f"{money(ev / 1e9)}B"},
+                {"Step": "Minus: net debt (debt minus cash)", "Amount": f"-{money(net_debt / 1e9)}B"},
+                {"Step": "Equity value (what belongs to shareholders)", "Amount": f"{money((ev - net_debt) / 1e9)}B"},
+                {"Step": f"Divided by shares ({shares / 1e9:,.2f}B)", "Amount": f"{money(fair_value)} per share"},
+            ]
+        )
+        st.dataframe(bridge, hide_index=True, use_container_width=True)
+
+    # ---- Tab 3: reverse DCF ----
+    with tab3:
+        st.markdown(
+            "Instead of asking *'what is the stock worth?'*, flip the question: "
+            "**'what would have to be true for today's price to be fair?'** This is called a **reverse DCF**, "
+            "and many professionals consider it more useful than the forward version."
+        )
+        if imp_g is None:
+            st.info("With your other assumptions, no reasonable growth rate matches today's price. Try changing the discount rate.")
+        else:
+            r1, r2, r3 = st.columns(3)
+            r1.metric("Growth you assumed (yr 1)", f"{growth:.1%}")
+            r2.metric("Growth the price implies", f"{imp_g:.1%}")
+            r3.metric("Gap", f"{(imp_g - growth) * 100:+.1f} pts")
+            hist_g = None
+            if len(fcf_hist) >= 3 and fcf_hist.iloc[0] > 0 and fcf_hist.iloc[-1] > 0:
+                hist_g = (fcf_hist.iloc[-1] / fcf_hist.iloc[0]) ** (1 / (len(fcf_hist) - 1)) - 1
+            st.markdown(
+                f"With your discount rate ({wacc:.1%}) and terminal growth ({terminal_g:.2%}), today's price of "
+                f"{money(price)} makes sense **only if free cash flow grows about {imp_g:.1%} a year** at the start."
+            )
+            if hist_g is not None:
+                st.markdown(
+                    f"For context, this company's free cash flow has actually grown about **{hist_g:.1%} per year** "
+                    "over the years of data available. Ask yourself: is the required growth realistic compared with the past?"
+                )
+        st.markdown("**Try it yourself:** move the discount rate slider up and watch the implied growth needed to justify the same price rise. Higher required returns demand more growth.")
+
+    # ---- Tab 4: glossary ----
+    with tab4:
+        with st.expander("What is WACC (discount rate)?", expanded=True):
+            st.markdown(
+                f"""
+**WACC** stands for *Weighted Average Cost of Capital*. It is the **return investors demand** for
+putting money into this company instead of somewhere else. A company is financed by shareholders and lenders,
+and each wants to be paid for the risk they take. WACC blends those required returns.
+
+**Why do we discount future cash with it?** Because of two ideas:
+- *Time value of money:* {money(100)} today can be invested and grow, so {money(100)} next year is worth less.
+- *Risk:* the riskier the company, the higher the return investors demand, so the more future cash is shrunk.
+
+**How this app estimates it (CAPM):**
+
+`required return = risk-free rate + beta × equity risk premium`
+
+| Piece | Meaning | {ticker} today |
+|---|---|---|
+| Risk-free rate | What a "safe" 10-year US Treasury pays | {rf:.2%} |
+| Beta | How much the stock moves vs. the market (1.0 = same as market) | {beta:.2f} |
+| Equity risk premium | Extra return investors expect for owning stocks instead of Treasuries (assumed) | 5.00% |
+| **Result** | | **{cost_of_equity:.2%}** |
+
+**Honest caveat:** a full WACC also blends in the company's cost of *debt*, weighted by how much debt it has.
+This app uses the CAPM figure only (technically the *cost of equity*) to keep things simple. Real analysts build the full blend.
+
+**Why it matters so much:** a small change in WACC moves the valuation a lot, because it affects every year of cash flow and the terminal value. Check the sensitivity heatmap.
+"""
+            )
+        with st.expander("What is free cash flow (FCF)?"):
+            st.markdown(
+                "Cash a company generates from operations **minus** what it must spend on equipment and facilities (capital expenditures) to keep the business running. "
+                "It is the cash that could be paid to owners without hurting the business. Unlike accounting profit, it is hard to dress up with accounting choices."
+            )
+        with st.expander("What is terminal growth?"):
+            st.markdown(
+                "The steady growth rate assumed from the end of the forecast **forever**. It has to be small, usually near long-run inflation or economic growth (about 2-3%). "
+                "If it were higher than the economy's growth, the company would eventually become bigger than the entire economy, which is impossible."
+            )
+        with st.expander("What is terminal value?"):
+            st.markdown(
+                "A company doesn't stop existing after year 5 or 10. Terminal value is a shortcut for the value of **all the cash flows after the forecast ends**, "
+                "calculated with the Gordon Growth formula: `FCF × (1 + g) / (WACC − g)`. Notice that the gap between WACC and g is in the denominator, so when they get close, the value explodes. That's why the model requires WACC > terminal growth."
+            )
+        with st.expander("What is net debt?"):
+            st.markdown(
+                "Total debt minus cash. The cash flows we valued belong to *everyone* who funded the company, including lenders. "
+                "Lenders get paid first, so we subtract net debt to find what is left for shareholders."
+            )
+        with st.expander("What is a margin of safety?"):
+            st.markdown(
+                "Because every DCF rests on guesses, careful investors want a price well below their estimate of value, as a cushion against being wrong. "
+                "It's a way of building humility into the process."
+            )
+        with st.expander("What does the Monte Carlo simulation teach?"):
+            st.markdown(
+                "Instead of trusting one set of guesses, it runs thousands of slightly different versions. A **wide** spread of results means the valuation "
+                "is very sensitive to the assumptions. That is a sign to be cautious about any single number."
+            )
+
+    st.markdown(
+        '<div style="margin-top:10px; font-size:0.8rem; color:#9AA4B2;">'
+        "Educational content only. This model explains how valuation works and does not recommend buying or selling any security."
+        "</div>",
+        unsafe_allow_html=True,
+    )
 # ---------------------------------------------------------------
 # 8. HISTORICAL FCF
 # ---------------------------------------------------------------
