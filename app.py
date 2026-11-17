@@ -1102,4 +1102,4 @@ with st.expander("How this model works"):
         The Monte Carlo run repeats this thousands of times with randomized assumptions to show a range of outcomes.
         """
     )
-"""
+
