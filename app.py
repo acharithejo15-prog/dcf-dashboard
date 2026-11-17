@@ -196,6 +196,8 @@ st.caption("Live data from Yahoo Finance. For educational purposes, not investme
 def load_data(ticker):
     t = yf.Ticker(ticker)
     return t.cashflow, t.info
+
+
 @st.cache_data(ttl=3600)
 def get_ttm_eps(ticker_symbol):
     try:
@@ -223,6 +225,7 @@ def get_ttm_eps(ticker_symbol):
 
     except Exception:
         return None
+
 
 @st.cache_data(ttl=3600)
 def get_risk_free_rate():
@@ -343,7 +346,6 @@ if wacc <= terminal_g:
 fair_value = dcf_value(fcf0, growth, wacc, terminal_g, years, net_debt, shares)
 st.toast(f"Loaded {ticker}: fair value ${fair_value:,.2f}", icon="📈")
 upside = fair_value / price - 1
-# ---------------- Model verdict ----------------
 # ---------------- Model verdict ----------------
 # Volatility: how much the price has swung over the last year
 _h = load_price_history(ticker)
@@ -530,15 +532,118 @@ if hasattr(st, "popover"):
 else:
     with st.expander("ℹ️ About this company"):
         about_content()
-        if sector in ("Financial Services", "Real Estate"):st.warning(
+
+if sector in ("Financial Services", "Real Estate"):
+    st.warning(
         f"**Heads up:** a free-cash-flow DCF works poorly for {sector.lower()} companies. "
         "Banks, insurers, and REITs have cash flows that don't mean the same thing, so treat this number as a "
         "teaching example, not a reliable valuation."
     )
 
+# ---------------------------------------------------------------
+# Helper functions (defined once, up here so every tab can use them)
+# ---------------------------------------------------------------
+import html as _html
+
+
+@st.cache_data(ttl=300)
+def load_chart_data(ticker, period, interval):
+    return yf.Ticker(ticker).history(period=period, interval=interval)
+
+
+@st.cache_data(ttl=900)
+def load_news(ticker, limit=3):
+    """Latest headlines for a ticker (refreshes every 15 minutes)."""
+    try:
+        raw = yf.Ticker(ticker).news or []
+    except Exception:
+        return []
+
+    items = []
+    for n in raw:
+        c = n.get("content", n)  # newer yfinance nests data under "content"
+        title = c.get("title")
+        link = (
+            (c.get("canonicalUrl") or {}).get("url")
+            or (c.get("clickThroughUrl") or {}).get("url")
+            or n.get("link")
+        )
+        provider = c.get("provider")
+        publisher = provider.get("displayName") if isinstance(provider, dict) else n.get("publisher")
+
+        when = None
+        if c.get("pubDate"):
+            when = pd.to_datetime(c["pubDate"], utc=True)
+        elif n.get("providerPublishTime"):
+            when = pd.to_datetime(n["providerPublishTime"], unit="s", utc=True)
+
+        if title and link:
+            items.append({"title": title, "link": link, "publisher": publisher or "News", "when": when})
+        if len(items) >= limit:
+            break
+    return items
+
+
+def time_ago(ts):
+    if ts is None:
+        return ""
+    secs = (pd.Timestamp.now(tz="UTC") - ts).total_seconds()
+    if secs < 3600:
+        return f"{max(int(secs // 60), 1)} min ago"
+    if secs < 86400:
+        return f"{int(secs // 3600)} hr ago"
+    return f"{int(secs // 86400)} days ago"
+
+
+def money(x):
+    return f"\\${x:,.2f}"  # escaped so Streamlit doesn't treat $ as math
+
+
+def dcf_breakdown(fcf0, growth, wacc, terminal_g, years):
+    """Splits enterprise value into 'next few years of cash' vs. 'everything after'."""
+    flows, fcf = [], fcf0
+    for t in range(1, years + 1):
+        g_t = growth + (terminal_g - growth) * (t - 1) / max(years - 1, 1)
+        fcf *= 1 + g_t
+        flows.append(fcf)
+    pv_flows = sum(f / (1 + wacc) ** t for t, f in enumerate(flows, start=1))
+    tv = flows[-1] * (1 + terminal_g) / (wacc - terminal_g)
+    pv_tv = tv / (1 + wacc) ** years
+    return pv_flows, pv_tv
+
+
+def implied_growth(target_price):
+    """Reverse DCF: what year-1 growth would justify today's price? (bisection)"""
+    lo, hi = -0.30, 0.60
+    if not (dcf_value(fcf0, lo, wacc, terminal_g, years, net_debt, shares)
+            <= target_price
+            <= dcf_value(fcf0, hi, wacc, terminal_g, years, net_debt, shares)):
+        return None
+    for _ in range(60):
+        mid = (lo + hi) / 2
+        if dcf_value(fcf0, mid, wacc, terminal_g, years, net_debt, shares) < target_price:
+            lo = mid
+        else:
+            hi = mid
+    return (lo + hi) / 2
+
+
+def clean_num(value):
+    """Convert Yahoo Finance data into a valid number."""
+    try:
+        value = float(value)
+        return value if np.isfinite(value) else None
+    except (TypeError, ValueError):
+        return None
+
+
 tab_overview, tab_learn, tab_risk, tab_sent = st.tabs(
     ["📊 Overview", "🎓 Learn", "🎲 Risk", "💬 Sentiment"]
 )
+
+# ===============================================================
+# OVERVIEW TAB
+# ===============================================================
 tab_overview.__enter__()
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Current price", f"${price:,.2f}")
@@ -563,12 +668,6 @@ RANGES = {
     "5Y": ("5y", "1wk"),
     "Max": ("max", "1mo"),
 }
-
-
-@st.cache_data(ttl=300)
-def load_chart_data(ticker, period, interval):
-    return yf.Ticker(ticker).history(period=period, interval=interval)
-
 
 st.subheader(
     "Price chart",
@@ -636,59 +735,13 @@ else:
         hoverlabel=dict(bgcolor="#1A1F2B", font_size=13),
     )
     st.plotly_chart(
-        fig_price, use_container_width=True,
+        fig_price, use_container_width=True, key="price_chart",
         config={"displayModeBar": False, "scrollZoom": False, "doubleClick": False},
     )
-    # ---------------------------------------------------------------
+
+# ---------------------------------------------------------------
 # LATEST NEWS
 # ---------------------------------------------------------------
-import html as _html
-
-
-@st.cache_data(ttl=900)
-def load_news(ticker, limit=3):
-    """Latest headlines for a ticker (refreshes every 15 minutes)."""
-    try:
-        raw = yf.Ticker(ticker).news or []
-    except Exception:
-        return []
-
-    items = []
-    for n in raw:
-        c = n.get("content", n)  # newer yfinance nests data under "content"
-        title = c.get("title")
-        link = (
-            (c.get("canonicalUrl") or {}).get("url")
-            or (c.get("clickThroughUrl") or {}).get("url")
-            or n.get("link")
-        )
-        provider = c.get("provider")
-        publisher = provider.get("displayName") if isinstance(provider, dict) else n.get("publisher")
-
-        when = None
-        if c.get("pubDate"):
-            when = pd.to_datetime(c["pubDate"], utc=True)
-        elif n.get("providerPublishTime"):
-            when = pd.to_datetime(n["providerPublishTime"], unit="s", utc=True)
-
-        if title and link:
-            items.append({"title": title, "link": link, "publisher": publisher or "News", "when": when})
-        if len(items) >= limit:
-            break
-    return items
-
-
-def time_ago(ts):
-    if ts is None:
-        return ""
-    secs = (pd.Timestamp.now(tz="UTC") - ts).total_seconds()
-    if secs < 3600:
-        return f"{max(int(secs // 60), 1)} min ago"
-    if secs < 86400:
-        return f"{int(secs // 3600)} hr ago"
-    return f"{int(secs // 86400)} days ago"
-
-
 st.subheader(
     f"Latest news on {ticker}",
     help="Recent headlines about this company from news outlets, so you can see what may be moving the stock. Headlines are not analyzed or endorsed by this tool, and they are not investment advice.",
@@ -743,7 +796,7 @@ left.dataframe(scen_df, hide_index=True, use_container_width=True)
 fig_scen = go.Figure(go.Bar(x=scen_df["Scenario"], y=scen_df["Fair value"], marker_color=["#c0392b", "#7f8c8d", "#27ae60"]))
 fig_scen.add_hline(y=price, line_dash="dash", annotation_text="Current price")
 fig_scen.update_layout(title="Fair value by scenario", yaxis_title="$ per share", height=320)
-right.plotly_chart(fig_scen, use_container_width=True)
+right.plotly_chart(fig_scen, use_container_width=True, key="scenario_chart")
 
 # ---------------------------------------------------------------
 # 6. SENSITIVITY HEATMAP: WACC vs terminal growth
@@ -767,8 +820,32 @@ fig_heat = px.imshow(
     labels=dict(x="Terminal growth", y="WACC", color="$/share"),
 )
 fig_heat.update_layout(height=420)
-st.plotly_chart(fig_heat, use_container_width=True)
+st.plotly_chart(fig_heat, use_container_width=True, key="heatmap_chart")
+
+# ---------------------------------------------------------------
+# 8. HISTORICAL FCF
+# ---------------------------------------------------------------
+st.subheader("Historical free cash flow")
+fig_fcf = px.bar(x=fcf_hist.index.year, y=fcf_hist.values / 1e9, labels={"x": "Year", "y": "FCF ($B)"})
+fig_fcf.update_layout(height=320)
+st.plotly_chart(fig_fcf, use_container_width=True, key="fcf_history_chart")
+
+with st.expander("How this model works"):
+    st.markdown(
+        """
+        1. Take the latest free cash flow (operating cash flow minus capex).
+        2. Project it forward using the growth rate you choose.
+        3. Estimate a terminal value with the Gordon Growth formula: FCF x (1+g) / (WACC - g).
+        4. Discount everything back to today at the WACC.
+        5. Subtract net debt and divide by shares outstanding.
+        The Monte Carlo run repeats this thousands of times with randomized assumptions to show a range of outcomes.
+        """
+    )
 tab_overview.__exit__(None, None, None)
+
+# ===============================================================
+# RISK TAB
+# ===============================================================
 tab_risk.__enter__()
 # ---------------------------------------------------------------
 # 7. RISK MODEL: Monte Carlo simulation
@@ -795,36 +872,44 @@ n_sims = st.slider(
     500, 10000, 2000, 500,
     help="How many times the model is re-run with slightly different assumptions. More runs give a smoother, more reliable picture, but the overall conclusion should stay about the same. 2,000 to 5,000 is plenty.",
 )
-rng = np.random.default_rng(42)
-g_draws = rng.normal(growth, 0.03, n_sims)
-w_draws = rng.normal(wacc, 0.01, n_sims)
-t_draws = np.clip(rng.normal(terminal_g, 0.005, n_sims), 0, 0.04)
 
-w_draws = np.maximum(w_draws, t_draws + 0.01)  # keep WACC above terminal growth
-results = np.array([
-    dcf_value(fcf0, g, w, tg, years, net_debt, shares)
-    for g, w, tg in zip(g_draws, w_draws, t_draws)
-])
+if fcf0 <= 0:
+    st.info("The simulation is skipped because this company has negative free cash flow, so the DCF cannot value it.")
+else:
+    rng = np.random.default_rng(42)
+    g_draws = rng.normal(growth, 0.03, n_sims)
+    w_draws = rng.normal(wacc, 0.01, n_sims)
+    t_draws = np.clip(rng.normal(terminal_g, 0.005, n_sims), 0, 0.04)
 
-p5, p50, p95 = np.percentile(results, [5, 50, 95])
-prob_undervalued = (results > price).mean()
+    w_draws = np.maximum(w_draws, t_draws + 0.01)  # keep WACC above terminal growth
+    results = np.array([
+        dcf_value(fcf0, g, w, tg, years, net_debt, shares)
+        for g, w, tg in zip(g_draws, w_draws, t_draws)
+    ])
 
-m1, m2, m3, m4 = st.columns(4)
-m1.metric("5th percentile", f"${p5:,.2f}",
-          help="A pessimistic outcome. Only 5 out of every 100 runs gave a value lower than this.")
-m2.metric("Median", f"${p50:,.2f}",
-          help="The middle result. Half of the runs gave a higher value and half gave a lower one.")
-m3.metric("95th percentile", f"${p95:,.2f}",
-          help="An optimistic outcome. Only 5 out of every 100 runs gave a value higher than this.")
-m4.metric("Probability fair value > price", f"{prob_undervalued:.0%}",
-          help="The share of runs where the model's value came out higher than today's stock price. Near 50% means it's roughly a coin flip. Much higher suggests the stock may be undervalued, and much lower suggests it may be overvalued.")
+    p5, p50, p95 = np.percentile(results, [5, 50, 95])
+    prob_undervalued = (results > price).mean()
 
-fig_mc = px.histogram(x=results, nbins=60, labels={"x": "Fair value per share ($)"})
-fig_mc.add_vline(x=price, line_dash="dash", line_color="red", annotation_text="Current price")
-fig_mc.add_vline(x=p50, line_color="black", annotation_text="Median")
-fig_mc.update_layout(height=380, showlegend=False)
-st.plotly_chart(fig_mc, use_container_width=True)
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("5th percentile", f"${p5:,.2f}",
+              help="A pessimistic outcome. Only 5 out of every 100 runs gave a value lower than this.")
+    m2.metric("Median", f"${p50:,.2f}",
+              help="The middle result. Half of the runs gave a higher value and half gave a lower one.")
+    m3.metric("95th percentile", f"${p95:,.2f}",
+              help="An optimistic outcome. Only 5 out of every 100 runs gave a value higher than this.")
+    m4.metric("Probability fair value > price", f"{prob_undervalued:.0%}",
+              help="The share of runs where the model's value came out higher than today's stock price. Near 50% means it's roughly a coin flip. Much higher suggests the stock may be undervalued, and much lower suggests it may be overvalued.")
+
+    fig_mc = px.histogram(x=results, nbins=60, labels={"x": "Fair value per share ($)"})
+    fig_mc.add_vline(x=price, line_dash="dash", line_color="red", annotation_text="Current price")
+    fig_mc.add_vline(x=p50, line_color="black", annotation_text="Median")
+    fig_mc.update_layout(height=380, showlegend=False)
+    st.plotly_chart(fig_mc, use_container_width=True, key="monte_carlo_chart")
 tab_risk.__exit__(None, None, None)
+
+# ===============================================================
+# SENTIMENT TAB
+# ===============================================================
 tab_sent.__enter__()
 # ---------------------------------------------------------------
 # 7b. MARKET SENTIMENT: what investors think
@@ -919,30 +1004,13 @@ else:
         hide_index=True,
         use_container_width=True,
     )
-   
-# ---------- IMPROVED P/E AND EPS CALCULATIONS ----------
 
-def clean_num(value):
-    """Convert Yahoo Finance data into a valid number."""
-    try:
-        value = float(value)
-        return value if np.isfinite(value) else None
-    except (TypeError, ValueError):
-        return None
-
+# ---------- P/E AND EPS CALCULATIONS ----------
 
 # Retrieve Yahoo Finance values
 pe_t = clean_num(info.get("trailingPE"))
 eps_t = clean_num(info.get("trailingEps"))
 
-# Retrieve forward estimates from Yahoo Finance
-try:
-    stock = yf.Ticker(ticker)
-    eps_f = clean_num(stock.info.get("forwardEps"))
-    pe_f = clean_num(stock.info.get("forwardPE"))
-except Exception:
-    eps_f = None
-    pe_f = None
 # Retrieve forward estimates from Yahoo Finance
 eps_f = clean_num(info.get("forwardEps"))
 pe_f = clean_num(info.get("forwardPE"))
@@ -1071,51 +1139,16 @@ if signals:
                                     line=dict(color="#F5A623", width=1, dash="dot")))
         fig_px.add_hline(y=fair_value, line_dash="dash", line_color="#00C48C", annotation_text="DCF fair value")
         fig_px.update_layout(title="1-year price vs. DCF fair value", yaxis_title="$ per share", height=360, template="plotly_dark")
-        st.plotly_chart(fig_px, use_container_width=True)
-        # ---------------------------------------------------------------
-# ---------------------------------------------------------------
-# LEARN: why is this stock valued this way?
-# ---------------------------------------------------------------
-        st.plotly_chart(fig_px, use_container_width=True)
-        # ---------------------------------------------------------------
-# ---------------------------------------------------------------
-# LEARN: why is this stock valued this way?
-# ---------------------------------------------------------------
+        st.plotly_chart(fig_px, use_container_width=True, key="sentiment_price_chart")
 tab_sent.__exit__(None, None, None)
+
+# ===============================================================
+# LEARN TAB
+# ===============================================================
 tab_learn.__enter__()
-def money(x):
-    return f"\\${x:,.2f}"  # escaped so Streamlit doesn't treat $ as math
-
-
-def dcf_breakdown(fcf0, growth, wacc, terminal_g, years):
-    """Splits enterprise value into 'next few years of cash' vs. 'everything after'."""
-    flows, fcf = [], fcf0
-    for t in range(1, years + 1):
-        g_t = growth + (terminal_g - growth) * (t - 1) / max(years - 1, 1)
-        fcf *= 1 + g_t
-        flows.append(fcf)
-    pv_flows = sum(f / (1 + wacc) ** t for t, f in enumerate(flows, start=1))
-    tv = flows[-1] * (1 + terminal_g) / (wacc - terminal_g)
-    pv_tv = tv / (1 + wacc) ** years
-    return pv_flows, pv_tv
-
-
-def implied_growth(target_price):
-    """Reverse DCF: what year-1 growth would justify today's price? (bisection)"""
-    lo, hi = -0.30, 0.60
-    if not (dcf_value(fcf0, lo, wacc, terminal_g, years, net_debt, shares)
-            <= target_price
-            <= dcf_value(fcf0, hi, wacc, terminal_g, years, net_debt, shares)):
-        return None
-    for _ in range(60):
-        mid = (lo + hi) / 2
-        if dcf_value(fcf0, mid, wacc, terminal_g, years, net_debt, shares) < target_price:
-            lo = mid
-        else:
-            hi = mid
-    return (lo + hi) / 2
-
-
+# ---------------------------------------------------------------
+# LEARN: why is this stock valued this way?
+# ---------------------------------------------------------------
 st.header(
     "Learn: why is this stock valued this way?",
     help="This section explains the reasoning behind the number, not just the number. Change the sidebar assumptions and watch the explanations update.",
@@ -1199,11 +1232,11 @@ For **{info.get('longName', ticker)}**, this model does the following:
             height=320, template="plotly_dark", yaxis_title="Present value ($B)",
             margin=dict(l=10, r=10, t=10, b=10),
         )
-        st.plotly_chart(fig_src, use_container_width=True) 
+        st.plotly_chart(fig_src, use_container_width=True, key="value_source_chart")
         st.markdown(
             f"**{tv_share:.0%} of this company's value comes from the terminal value.** "
             "That is typical for a DCF, and it is the model's biggest weakness: most of the answer "
-            "depends on a guess about the distant future. This is why the sensitivity heatmap above "
+            "depends on a guess about the distant future. This is why the sensitivity heatmap on the Overview tab "
             "matters so much."
         )
         if tv_share > 0.75:
@@ -1230,10 +1263,10 @@ For **{info.get('longName', ticker)}**, this model does the following:
         if imp_g is None:
             st.info("With your other assumptions, no reasonable growth rate matches today's price. Try changing the discount rate.")
         else:
-            r1, r2, r3 = st.columns(3)
-            r1.metric("Growth you assumed (yr 1)", f"{growth:.1%}")
-            r2.metric("Growth the price implies", f"{imp_g:.1%}")
-            r3.metric("Gap", f"{(imp_g - growth) * 100:+.1f} pts")
+            rc1, rc2, rc3 = st.columns(3)
+            rc1.metric("Growth you assumed (yr 1)", f"{growth:.1%}")
+            rc2.metric("Growth the price implies", f"{imp_g:.1%}")
+            rc3.metric("Gap", f"{(imp_g - growth) * 100:+.1f} pts")
             hist_g = None
             if len(fcf_hist) >= 3 and fcf_hist.iloc[0] > 0 and fcf_hist.iloc[-1] > 0:
                 hist_g = (fcf_hist.iloc[-1] / fcf_hist.iloc[0]) ** (1 / (len(fcf_hist) - 1)) - 1
@@ -1275,7 +1308,7 @@ and each wants to be paid for the risk they take. WACC blends those required ret
 **Honest caveat:** a full WACC also blends in the company's cost of *debt*, weighted by how much debt it has.
 This app uses the CAPM figure only (technically the *cost of equity*) to keep things simple. Real analysts build the full blend.
 
-**Why it matters so much:** a small change in WACC moves the valuation a lot, because it affects every year of cash flow and the terminal value. Check the sensitivity heatmap.
+**Why it matters so much:** a small change in WACC moves the valuation a lot, because it affects every year of cash flow and the terminal value. Check the sensitivity heatmap on the Overview tab.
 """
             )
         with st.expander("What is free cash flow (FCF)?"):
@@ -1326,27 +1359,4 @@ This app uses the CAPM figure only (technically the *cost of equity*) to keep th
             st.success("Correct! A higher required return shrinks the value of all future cash flows.")
         else:
             st.error("Not quite. Try moving the WACC slider and watch the fair value.")
-            tab_learn.__exit__(None, None, None)
-tab_overview.__enter__()
-# ---------------------------------------------------------------
-# 8. HISTORICAL FCF
-# ---------------------------------------------------------------
-st.error("Not quite. Try moving the WACC slider and watch the fair value.")
 tab_learn.__exit__(None, None, None)
-tab_overview.__enter__()
-st.subheader("Historical free cash flow")
-fig_fcf = px.bar(x=fcf_hist.index.year, y=fcf_hist.values / 1e9, labels={"x": "Year", "y": "FCF ($B)"})
-fig_fcf.update_layout(height=320)
-st.plotly_chart(fig_px, use_container_width=True, key="sentiment_price_chart")
-with st.expander("How this model works"):
-    st.markdown(
-        """
-        1. Take the latest free cash flow (operating cash flow minus capex).
-        2. Project it forward using the growth rate you choose.
-        3. Estimate a terminal value with the Gordon Growth formula: FCF x (1+g) / (WACC - g).
-        4. Discount everything back to today at the WACC.
-        5. Subtract net debt and divide by shares outstanding.
-        The Monte Carlo run repeats this thousands of times with randomized assumptions to show a range of outcomes.
-        """
-    )
-tab_overview.__exit__(None, None, None)
