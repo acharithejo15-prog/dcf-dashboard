@@ -1076,6 +1076,13 @@ if signals:
 # ---------------------------------------------------------------
 # LEARN: why is this stock valued this way?
 # ---------------------------------------------------------------
+        st.plotly_chart(fig_px, use_container_width=True)
+        # ---------------------------------------------------------------
+# ---------------------------------------------------------------
+# LEARN: why is this stock valued this way?
+# ---------------------------------------------------------------
+tab_sent.__exit__(None, None, None)
+tab_learn.__enter__()
 def money(x):
     return f"\\${x:,.2f}"  # escaped so Streamlit doesn't treat $ as math
 
@@ -1324,6 +1331,9 @@ tab_overview.__enter__()
 # ---------------------------------------------------------------
 # 8. HISTORICAL FCF
 # ---------------------------------------------------------------
+st.error("Not quite. Try moving the WACC slider and watch the fair value.")
+tab_learn.__exit__(None, None, None)
+tab_overview.__enter__()
 st.subheader("Historical free cash flow")
 fig_fcf = px.bar(x=fcf_hist.index.year, y=fcf_hist.values / 1e9, labels={"x": "Year", "y": "FCF ($B)"})
 fig_fcf.update_layout(height=320)
