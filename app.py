@@ -153,8 +153,13 @@ def load_price_history(ticker):
 # 2. THE DCF MODEL
 # ---------------------------------------------------------------
 def dcf_value(fcf0, growth, wacc, terminal_g, years, net_debt, shares):
-    """Returns fair value per share."""
-    flows = [fcf0 * (1 + growth) ** t for t in range(1, years + 1)]
+    """Returns fair value per share. Growth fades gradually toward terminal growth."""
+    flows = []
+    fcf = fcf0
+    for t in range(1, years + 1):
+        g_t = growth + (terminal_g - growth) * (t - 1) / max(years - 1, 1)
+        fcf = fcf * (1 + g_t)
+        flows.append(fcf)
     pv_flows = sum(f / (1 + wacc) ** t for t, f in enumerate(flows, start=1))
     terminal_value = flows[-1] * (1 + terminal_g) / (wacc - terminal_g)
     pv_terminal = terminal_value / (1 + wacc) ** years
@@ -197,11 +202,24 @@ if not price or not shares or fcf_hist.empty:
     st.error("This ticker is missing price, share count, or cash flow data.")
     st.stop()
 
-fcf0 = float(fcf_hist.iloc[-1])
+use_avg = st.sidebar.checkbox(
+    "Use 3-year average FCF", value=True,
+    help="Averages the last three years of free cash flow, so one unusual year does not distort the valuation.",
+)
+fcf0 = float(fcf_hist.tail(3).mean()) if use_avg else float(fcf_hist.iloc[-1])
 if fcf0 <= 0:
     st.warning("Latest free cash flow is negative, so a simple DCF will not be meaningful for this company.")
 
-growth = st.sidebar.slider("FCF growth rate (years 1-5)", -0.05, 0.30, 0.08, 0.005, format="%.3f")
+default_g = 0.06
+if len(fcf_hist) >= 3 and fcf_hist.iloc[0] > 0 and fcf_hist.iloc[-1] > 0:
+    cagr = (fcf_hist.iloc[-1] / fcf_hist.iloc[0]) ** (1 / (len(fcf_hist) - 1)) - 1
+    default_g = float(np.clip(cagr, 0.02, 0.12))
+default_g = round(default_g / 0.005) * 0.005
+
+growth = st.sidebar.slider(
+    "FCF growth rate (year 1)", -0.05, 0.30, float(default_g), 0.005, format="%.3f",
+    help="Starting growth rate. It fades gradually toward the terminal growth rate. The default is based on the company's own past cash flow growth, kept between 2% and 12%.",
+)
 wacc = st.sidebar.slider(
     "Discount rate (WACC)", 0.05, 0.15, float(np.clip(round(suggested_wacc, 3), 0.05, 0.15)), 0.005, format="%.3f"
 )
