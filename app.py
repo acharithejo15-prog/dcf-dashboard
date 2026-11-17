@@ -701,7 +701,56 @@ else:
         hide_index=True,
         use_container_width=True,
     )
+    # ---------- P/E and EPS ----------
+    def _num(x):
+        """Return a clean number, or None if the value is missing or blank."""
+        try:
+            x = float(x)
+            return x if np.isfinite(x) else None
+        except (TypeError, ValueError):
+            return None
 
+    pe_t = _num(info.get("trailingPE"))
+    pe_f = _num(info.get("forwardPE"))
+    eps_t = _num(info.get("trailingEps"))
+    eps_f = _num(info.get("forwardEps"))
+
+    st.markdown("**Earnings and valuation multiples**")
+    e1, e2, e3, e4 = st.columns(4)
+    e1.metric(
+        "P/E ratio (trailing)", f"{pe_t:.1f}" if pe_t else "N/A",
+        help="Price divided by earnings per share over the last 12 months. It shows how many dollars investors pay for each $1 of yearly profit. A higher number means investors expect more growth, or the stock is expensive. Compare it to similar companies, not to every stock.",
+    )
+    e2.metric(
+        "P/E ratio (forward)", f"{pe_f:.1f}" if pe_f else "N/A",
+        help="Same idea, but using analysts' estimates of next year's earnings. If it is lower than the trailing P/E, analysts expect profits to grow.",
+    )
+    e3.metric(
+        "EPS (trailing)", f"${eps_t:,.2f}" if eps_t is not None else "N/A",
+        help="Earnings per share: the company's profit over the last 12 months divided by its number of shares. It is the profit that belongs to each share you own.",
+    )
+    e4.metric(
+        "EPS (forward estimate)", f"${eps_f:,.2f}" if eps_f is not None else "N/A",
+        help="What analysts expect each share to earn over the next 12 months.",
+    )
+
+    # Plain-English reading
+    notes = []
+    if pe_t:
+        notes.append(f"Investors are paying about **${pe_t:.0f}** for every **$1** of the company's yearly profit.")
+    if eps_t and eps_f and eps_t > 0:
+        g = eps_f / eps_t - 1
+        if g > 0.02:
+            notes.append(f"Analysts expect earnings per share to **grow about {g:.0%}** over the next year.")
+        elif g < -0.02:
+            notes.append(f"Analysts expect earnings per share to **fall about {abs(g):.0%}** over the next year.")
+        else:
+            notes.append("Analysts expect earnings per share to stay **roughly flat** over the next year.")
+    if eps_t is not None and eps_t <= 0:
+        notes.append("The company has **negative earnings** right now, so the P/E ratio is not meaningful.")
+    if notes:
+        st.markdown(" ".join(notes))
+    st.caption("P/E is best compared against similar companies in the same sector and against the company's own history. Data from Yahoo Finance and may be delayed.")
     # Hype vs. valuation: the key insight
     if fcf0 <= 0:
         v_text = "The DCF is not reliable for this company (negative free cash flow), so sentiment can't be compared to valuation."
