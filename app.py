@@ -176,8 +176,18 @@ except Exception as e:
     st.error(f"Could not load data for {ticker}. Check the ticker and try again. ({e})")
     st.stop()
 
-price = info.get("currentPrice") or info.get("regularMarketPrice")
+price = info.get("currentPrice") or info.get("regularMarketPrice") or info.get("previousClose")
+if not price:
+    try:
+        price = float(yf.Ticker(ticker).history(period="5d")["Close"].dropna().iloc[-1])
+    except Exception:
+        price = None
 shares = info.get("sharesOutstanding")
+if not shares:
+    try:
+        shares = yf.Ticker(ticker).fast_info["shares"]
+    except Exception:
+        shares = None
 net_debt = (info.get("totalDebt") or 0) - (info.get("totalCash") or 0)
 beta = info.get("beta") or 1.0
 rf = get_risk_free_rate()
@@ -209,51 +219,121 @@ fair_value = dcf_value(fcf0, growth, wacc, terminal_g, years, net_debt, shares)
 st.toast(f"Loaded {ticker}: fair value ${fair_value:,.2f}", icon="📈")
 upside = fair_value / price - 1
 # ---------------- Model verdict ----------------
+# ---------------- Model verdict ----------------
+# Volatility: how much the price has swung over the last year
+_h = load_price_history(ticker)
+vol, max_dd = None, None
+if len(_h) > 60:
+    _r = _h["Close"].pct_change().dropna()
+    _v = float(_r.std() * np.sqrt(252))  # annualized
+    if np.isfinite(_v):
+        vol = _v
+        max_dd = float((_h["Close"] / _h["Close"].cummax() - 1).min())
+
+if vol is None:
+    vol_label, vol_color = "Unknown", "#9AA4B2"
+elif vol < 0.20:
+    vol_label, vol_color = "Low", "#00C48C"
+elif vol < 0.35:
+    vol_label, vol_color = "Moderate", "#4facfe"
+elif vol < 0.50:
+    vol_label, vol_color = "High", "#F5A623"
+else:
+    vol_label, vol_color = "Very high", "#FF4B4B"
+
+# Bear and bull values (same assumptions as the scenario table)
+bear_val = bull_val = None
+if fcf0 > 0:
+    bear_val = dcf_value(fcf0, growth - 0.04, wacc + 0.01, max(terminal_g - 0.005, 0), years, net_debt, shares)
+    bull_val = dcf_value(fcf0, growth + 0.04, max(wacc - 0.01, terminal_g + 0.01), terminal_g + 0.005, years, net_debt, shares)
+
+# Verdict
 if fcf0 <= 0:
     label, color, icon = "Model Not Reliable", "#F5A623", "⚠️"
-    summary = (
-        "This company has negative free cash flow, so a cash flow based DCF "
-        "cannot produce a meaningful valuation."
-    )
+    verdict_text = "This company has negative free cash flow, so a cash flow based DCF cannot produce a meaningful valuation."
 elif upside > 0.15:
     label, color, icon = "Appears Undervalued", "#00C48C", "📈"
-    summary = (
-        f"Based on your assumptions, the model estimates a fair value of "
-        f"${fair_value:,.2f}, about {upside:.0%} above the current price of ${price:,.2f}. "
+    verdict_text = (
+        f"Based on your assumptions, the model estimates a fair value of ${fair_value:,.2f}, "
+        f"about {upside:.0%} above the current price of ${price:,.2f}. "
         f"If the assumptions hold, the stock may be trading below its intrinsic value."
     )
 elif upside < -0.15:
     label, color, icon = "Appears Overvalued", "#FF4B4B", "📉"
-    summary = (
-        f"Based on your assumptions, the model estimates a fair value of "
-        f"${fair_value:,.2f}, about {abs(upside):.0%} below the current price of ${price:,.2f}. "
+    verdict_text = (
+        f"Based on your assumptions, the model estimates a fair value of ${fair_value:,.2f}, "
+        f"about {abs(upside):.0%} below the current price of ${price:,.2f}. "
         f"The market may be pricing in more growth than these assumptions allow."
     )
 else:
     label, color, icon = "Appears Fairly Valued", "#4facfe", "⚖️"
-    summary = (
-        f"Based on your assumptions, the model estimates a fair value of "
-        f"${fair_value:,.2f}, within about 15% of the current price of ${price:,.2f}. "
+    verdict_text = (
+        f"Based on your assumptions, the model estimates a fair value of ${fair_value:,.2f}, "
+        f"within about 15% of the current price of ${price:,.2f}. "
         f"The market price is roughly in line with the model."
+    )
+
+# Extra sections inside the banner
+extra_html = ""
+
+# 1) Potential upside / downside (all verdicts)
+if bear_val is not None:
+    bear_up = bear_val / price - 1
+    bull_up = bull_val / price - 1
+    extra_html += (
+        '<div style="margin-top:12px; color:#FAFAFA;">'
+        '<b>Potential upside / downside:</b> across the bear to bull scenarios, the model\'s fair value ranges from '
+        f'${bear_val:,.2f} to ${bull_val:,.2f} per share, which is '
+        f'<b style="color:#FF4B4B;">{bear_up:+.0%}</b> to <b style="color:#00C48C;">{bull_up:+.0%}</b> '
+        'versus the current price.</div>'
+    )
+
+# 2) Margin of safety (fairly valued)
+if label == "Appears Fairly Valued":
+    mos = (fair_value - price) / fair_value
+    if mos > 0:
+        mos_text = f"The current price sits <b>{mos:.1%}</b> below fair value, a small cushion."
+    else:
+        mos_text = f"The current price sits <b>{abs(mos):.1%}</b> above fair value, so there is <b>no cushion</b> right now."
+    extra_html += (
+        '<div style="margin-top:12px; padding:10px 14px; background:#0E1117; border-radius:8px; color:#FAFAFA;">'
+        '<b>🛡️ Margin of safety:</b> the gap between what a stock is worth and what you pay, which protects you if your estimates are wrong. '
+        f'{mos_text} Many value investors wait for a 20% to 30% cushion, which in this case would mean a price of about '
+        f'<b>${fair_value * 0.8:,.2f}</b> or lower (20%) or <b>${fair_value * 0.7:,.2f}</b> or lower (30%).</div>'
+    )
+
+# 3) Volatility (all verdicts, emphasized)
+if vol is not None:
+    if fcf0 > 0 and abs(upside) < vol:
+        gap_text = (
+            f"The valuation gap ({upside:+.0%}) is <b>smaller</b> than this stock's normal yearly swings, "
+            "so day-to-day price movement can easily outweigh it."
+        )
+    elif fcf0 > 0:
+        gap_text = (
+            f"The valuation gap ({upside:+.0%}) is larger than normal yearly swings, "
+            "but the price can still move sharply against you before any gap closes."
+        )
+    else:
+        gap_text = ""
+    dd_text = f" Its worst drop from a peak in the past year was <b>{max_dd:.0%}</b>." if max_dd is not None else ""
+    extra_html += (
+        f'<div style="margin-top:12px; padding:10px 14px; border:1px solid {vol_color}; border-radius:8px; color:#FAFAFA;">'
+        f'<b style="color:{vol_color};">⚡ Volatility: {vol_label} ({vol:.0%} per year).</b> '
+        f'In a typical year this stock\'s price can swing roughly ±{vol:.0%}.{dd_text} {gap_text}</div>'
     )
 
 st.toast(f"{ticker}: {label}", icon=icon)
 
 st.markdown(
-    f"""
-    <div style="border-left: 6px solid {color}; background: #1A1F2B;
-                padding: 16px 20px; border-radius: 10px; margin: 12px 0;">
-        <div style="font-size: 1.3rem; font-weight: 700; color: {color};">
-            {icon} Model signal: {label}
-        </div>
-        <div style="margin-top: 6px; color: #FAFAFA;">{summary}</div>
-        <div style="margin-top: 8px; font-size: 0.8rem; color: #9AA4B2;">
-            This is an educational model output based on the assumptions in the sidebar.
-            It is not investment advice and does not guarantee future results.
-            Change the assumptions and the signal will change.
-        </div>
-    </div>
-    """,
+    f'<div style="border-left:6px solid {color}; background:#1A1F2B; padding:16px 20px; border-radius:10px; margin:12px 0;">'
+    f'<div style="font-size:1.3rem; font-weight:700; color:{color};">{icon} Model signal: {label}</div>'
+    f'<div style="margin-top:6px; color:#FAFAFA;">{verdict_text}</div>'
+    f'{extra_html}'
+    '<div style="margin-top:12px; font-size:0.8rem; color:#9AA4B2;">'
+    'Educational model output based on the assumptions in the sidebar. Volatility is based on the past year and does not predict the future. '
+    'Not investment advice and no guarantee of future results.</div>'
+    '</div>',
     unsafe_allow_html=True,
 )
 
