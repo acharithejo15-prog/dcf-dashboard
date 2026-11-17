@@ -10,7 +10,7 @@ import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
 
-st.set_page_config(page_title="DCF Valuation Dashboard", layout="wide")
+st.set_page_config(page_title="RiskWise DCF", layout="wide")
 st.markdown("""
 <style>
 @keyframes fadeUp {
@@ -54,7 +54,81 @@ h2, h3 { animation: fadeUp 1s ease-out; }
 }
 </style>
 """, unsafe_allow_html=True)
-st.title("DCF Valuation & Risk Dashboard")
+# ---------------- Company search ----------------
+POPULAR = {
+    "apple": "AAPL", "microsoft": "MSFT", "google": "GOOGL", "alphabet": "GOOGL",
+    "amazon": "AMZN", "tesla": "TSLA", "nvidia": "NVDA", "meta": "META",
+    "facebook": "META", "netflix": "NFLX", "coca cola": "KO", "coca-cola": "KO",
+    "pepsi": "PEP", "walmart": "WMT", "nike": "NKE", "disney": "DIS",
+    "mcdonalds": "MCD", "mcdonald's": "MCD", "starbucks": "SBUX", "home depot": "HD",
+    "at&t": "T", "verizon": "VZ", "intel": "INTC", "amd": "AMD", "costco": "COST",
+}
+
+
+@st.cache_data(ttl=3600)
+def search_companies(query):
+    """Look up companies by name. Returns a list of (ticker, name, exchange)."""
+    out = []
+    try:
+        for r in yf.Search(query, max_results=10).quotes:
+            if r.get("quoteType") == "EQUITY" and r.get("symbol"):
+                name = r.get("longname") or r.get("shortname") or r["symbol"]
+                out.append((r["symbol"], name, r.get("exchDisp") or r.get("exchange") or ""))
+    except Exception:
+        pass
+    if not out and query.lower() in POPULAR:  # backup if the search service is unavailable
+        out.append((POPULAR[query.lower()], query.title(), ""))
+    return out
+
+st.title("RiskWise DCF")
+
+# ---------------- Page routing: home vs. analysis ----------------
+if "page" not in st.session_state:
+    st.session_state.page = "home"
+    st.session_state.ticker = None
+
+
+def go_analysis(t):
+    st.session_state.ticker = t
+    st.session_state.page = "analysis"
+
+
+def go_home():
+    st.session_state.page = "home"
+
+
+if st.session_state.page == "home":
+    st.markdown(
+        '<div style="text-align:center; margin:6px 0 22px 0; color:#9AA4B2; font-size:1.1rem;">'
+        "Learn how a company is valued, and why. Type a company below to begin."
+        "</div>",
+        unsafe_allow_html=True,
+    )
+    _, mid, _ = st.columns([1, 2, 1])
+    with mid:
+        q = st.text_input(
+            "Company", placeholder="Type a company name or ticker, e.g. Nike, Coca Cola, KO",
+            label_visibility="collapsed",
+        ).strip()
+        found = search_companies(q) if q else []
+        if found:
+            labels = [f"{n} ({s})" + (f" · {e}" if e else "") for s, n, e in found]
+            pick = st.selectbox("Select a match", labels)
+            st.button(
+                "Analyze →", type="primary", use_container_width=True,
+                on_click=go_analysis, args=(found[labels.index(pick)][0],),
+            )
+        elif q:
+            st.caption("No company found by that name. Check the spelling, or try it as a ticker.")
+            st.button("Try it as a ticker", on_click=go_analysis, args=(q.upper(),))
+
+        st.markdown("**Or start with an example:**")
+        ex_cols = st.columns(4)
+        for col, (nm, tk) in zip(ex_cols, [("Apple", "AAPL"), ("Coca-Cola", "KO"), ("Nike", "NKE"), ("Nvidia", "NVDA")]):
+            col.button(nm, key=f"ex_{tk}", on_click=go_analysis, args=(tk,), use_container_width=True)
+
+    st.caption("Educational tool using live Yahoo Finance data. Not investment advice.")
+    st.stop()
 # ---------------- Scrolling ticker tape ----------------
 TAPE_SYMBOLS = {
     "^GSPC": "S&P 500", "^DJI": "DOW", "^IXIC": "NASDAQ",
@@ -198,47 +272,11 @@ def dcf_value(fcf0, growth, wacc, terminal_g, years, net_debt, shares):
 # 3. SIDEBAR INPUTS
 # ---------------------------------------------------------------
 st.sidebar.header("Inputs")
-# ---------------- Company search ----------------
-POPULAR = {
-    "apple": "AAPL", "microsoft": "MSFT", "google": "GOOGL", "alphabet": "GOOGL",
-    "amazon": "AMZN", "tesla": "TSLA", "nvidia": "NVDA", "meta": "META",
-    "facebook": "META", "netflix": "NFLX", "coca cola": "KO", "coca-cola": "KO",
-    "pepsi": "PEP", "walmart": "WMT", "nike": "NKE", "disney": "DIS",
-    "mcdonalds": "MCD", "mcdonald's": "MCD", "starbucks": "SBUX", "home depot": "HD",
-    "at&t": "T", "verizon": "VZ", "intel": "INTC", "amd": "AMD", "costco": "COST",
-}
 
 
-@st.cache_data(ttl=3600)
-def search_companies(query):
-    """Look up companies by name. Returns a list of (ticker, name, exchange)."""
-    out = []
-    try:
-        for r in yf.Search(query, max_results=10).quotes:
-            if r.get("quoteType") == "EQUITY" and r.get("symbol"):
-                name = r.get("longname") or r.get("shortname") or r["symbol"]
-                out.append((r["symbol"], name, r.get("exchDisp") or r.get("exchange") or ""))
-    except Exception:
-        pass
-    if not out and query.lower() in POPULAR:  # backup if the search service is unavailable
-        out.append((POPULAR[query.lower()], query.title(), ""))
-    return out
-
-
-query = st.sidebar.text_input(
-    "Search company or ticker", "Apple",
-    help="Type a company name like 'Coca Cola' or 'Nike', or a ticker like 'KO'. Then pick the right match from the list that appears.",
-).strip()
-
-ticker = "AAPL"
-matches = search_companies(query) if query else []
-if matches:
-    labels = [f"{n} ({s})" + (f" · {e}" if e else "") for s, n, e in matches]
-    pick = st.sidebar.selectbox("Select a match", labels)
-    ticker = matches[labels.index(pick)][0]
-elif query:
-    st.sidebar.warning("No company found by that name, so the app will try it as a ticker. Check the spelling or try a different name.")
-    ticker = query.upper()
+st.sidebar.button("← Back to home", on_click=go_home, use_container_width=True)
+ticker = st.session_state.ticker
+st.sidebar.markdown(f"**Analyzing: {ticker}**")
 try:
     cf, info = load_data(ticker)
     fcf_hist = get_fcf_history(cf)
@@ -261,7 +299,11 @@ if not shares:
 net_debt = (info.get("totalDebt") or 0) - (info.get("totalCash") or 0)
 beta = info.get("beta") or 1.0
 rf = get_risk_free_rate()
-suggested_wacc = rf + beta * 0.05  # CAPM: risk-free + beta * 5% equity risk premium
+erp = st.sidebar.slider(
+    "Equity risk premium", 0.03, 0.08, 0.05, 0.005, format="%.3f",
+    help="The extra return investors expect for owning stocks instead of safe Treasuries. Historically around 4-6%.",
+)
+suggested_wacc = rf + beta * erp  # CAPM
 
 if not price or not shares or fcf_hist.empty:
     st.error("This ticker is missing price, share count, or cash flow data.")
@@ -335,21 +377,21 @@ if fcf0 <= 0:
     label, color, icon = "Model Not Reliable", "#F5A623", "⚠️"
     verdict_text = "This company has negative free cash flow, so a cash flow based DCF cannot produce a meaningful valuation."
 elif upside > 0.15:
-    label, color, icon = "Appears Undervalued", "#00C48C", "📈"
+    label, color, icon = "Model Value Above Price", "#00C48C", "📈"
     verdict_text = (
         f"Based on your assumptions, the model estimates a fair value of ${fair_value:,.2f}, "
         f"about {upside:.0%} above the current price of ${price:,.2f}. "
         f"If the assumptions hold, the stock may be trading below its intrinsic value."
     )
 elif upside < -0.15:
-    label, color, icon = "Appears Overvalued", "#FF4B4B", "📉"
+    label, color, icon = "Model Value Below Price", "#FF4B4B", "📉"
     verdict_text = (
         f"Based on your assumptions, the model estimates a fair value of ${fair_value:,.2f}, "
         f"about {abs(upside):.0%} below the current price of ${price:,.2f}. "
         f"The market may be pricing in more growth than these assumptions allow."
     )
 else:
-    label, color, icon = "Appears Fairly Valued", "#4facfe", "⚖️"
+    label, color, icon = "Model Value Near Price", "#4facfe", "⚖️"
     verdict_text = (
         f"Based on your assumptions, the model estimates a fair value of ${fair_value:,.2f}, "
         f"within about 15% of the current price of ${price:,.2f}. "
@@ -372,7 +414,7 @@ if bear_val is not None:
     )
 
 # 2) Margin of safety (fairly valued)
-if label == "Appears Fairly Valued":
+if label == "Model Value Near Price":
     mos = (fair_value - price) / fair_value
     if mos > 0:
         mos_text = f"The current price sits <b>{mos:.1%}</b> below fair value, a small cushion."
@@ -410,7 +452,7 @@ st.toast(f"{ticker}: {label}", icon=icon)
 
 st.markdown(
     f'<div style="border-left:6px solid {color}; background:#1A1F2B; padding:16px 20px; border-radius:10px; margin:12px 0;">'
-    f'<div style="font-size:1.3rem; font-weight:700; color:{color};">{icon} Model signal: {label}</div>'
+    f'<div style="font-size:1.3rem; font-weight:700; color:{color};">{icon} What the model shows: {label}</div>'
     f'<div style="margin-top:6px; color:#FAFAFA;">{verdict_text}</div>'
     f'{extra_html}'
     '<div style="margin-top:12px; font-size:0.8rem; color:#9AA4B2;">'
@@ -488,6 +530,15 @@ if hasattr(st, "popover"):
 else:
     with st.expander("ℹ️ About this company"):
         about_content()
+        if sector in ("Financial Services", "Real Estate"):st.warning(
+        f"**Heads up:** a free-cash-flow DCF works poorly for {sector.lower()} companies. "
+        "Banks, insurers, and REITs have cash flows that don't mean the same thing, so treat this number as a "
+        "teaching example, not a reliable valuation."
+    )
+
+tab_overview, tab_learn, tab_risk, tab_sent = st.tabs(
+    ["📊 Overview", "🎓 Learn", "🎲 Risk", "💬 Sentiment"]
+)
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Current price", f"${price:,.2f}")
 c2.metric("DCF fair value", f"${fair_value:,.2f}")
@@ -747,11 +798,11 @@ g_draws = rng.normal(growth, 0.03, n_sims)
 w_draws = rng.normal(wacc, 0.01, n_sims)
 t_draws = np.clip(rng.normal(terminal_g, 0.005, n_sims), 0, 0.04)
 
-results = []
-for g, w, tg in zip(g_draws, w_draws, t_draws):
-    if w > tg + 0.01:
-        results.append(dcf_value(fcf0, g, w, tg, years, net_debt, shares))
-results = np.array(results)
+w_draws = np.maximum(w_draws, t_draws + 0.01)  # keep WACC above terminal growth
+results = np.array([
+    dcf_value(fcf0, g, w, tg, years, net_debt, shares)
+    for g, w, tg in zip(g_draws, w_draws, t_draws)
+])
 
 p5, p50, p95 = np.percentile(results, [5, 50, 95])
 prob_undervalued = (results > price).mean()
@@ -1071,7 +1122,7 @@ else:
     ev = pv_flows + pv_tv
     tv_share = pv_tv / ev
     imp_g = implied_growth(price)
-    cost_of_equity = rf + beta * 0.05
+    cost_of_equity = rf + beta * erp
 
     tab1, tab2, tab3, tab4 = st.tabs(
         ["📖 The big picture", "🧩 Where the value comes from", "🔍 What the market is assuming", "📚 Glossary"]
@@ -1137,14 +1188,15 @@ For **{info.get('longName', ticker)}**, this model does the following:
             height=320, template="plotly_dark", yaxis_title="Present value ($B)",
             margin=dict(l=10, r=10, t=10, b=10),
         )
-        st.plotly_chart(fig_src, use_container_width=True)
-
+        st.plotly_chart(fig_src, use_container_width=True) 
         st.markdown(
             f"**{tv_share:.0%} of this company's value comes from the terminal value.** "
             "That is typical for a DCF, and it is the model's biggest weakness: most of the answer "
             "depends on a guess about the distant future. This is why the sensitivity heatmap above "
             "matters so much."
         )
+        if tv_share > 0.75:
+            st.warning("More than 75% of this value rests on the terminal value, so this estimate is very sensitive to long-term guesses.")
 
         st.markdown("**From company value to price per share:**")
         bridge = pd.DataFrame(
@@ -1206,7 +1258,7 @@ and each wants to be paid for the risk they take. WACC blends those required ret
 |---|---|---|
 | Risk-free rate | What a "safe" 10-year US Treasury pays | {rf:.2%} |
 | Beta | How much the stock moves vs. the market (1.0 = same as market) | {beta:.2f} |
-| Equity risk premium | Extra return investors expect for owning stocks instead of Treasuries (assumed) | 5.00% |
+| Equity risk premium | Extra return investors expect for owning stocks instead of Treasuries (assumed) |{erp:.2%}|
 | **Result** | | **{cost_of_equity:.2%}** |
 
 **Honest caveat:** a full WACC also blends in the company's cost of *debt*, weighted by how much debt it has.
