@@ -11,6 +11,7 @@ Saving progress between visits is the job of the database step (Supabase) later.
 import datetime
 import os
 import random
+import tempfile
 
 import streamlit as st
 import streamlit.components.v1 as components
@@ -416,14 +417,321 @@ SLASH_MODES = {
     "slash_val": ("🥷 Valuation Ninja", "A company's numbers appear. Slash the right call: under, fairly, or overvalued."),
 }
 
-_NINJA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ninja_component")
+_NINJA_HTML = r"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --card:#1A1F2B; --line:#2A3142; --txt:#FAFAFA; --mut:#9AA4B2; --grn:#00C48C; --blu:#4facfe; --red:#FF4B4B; --org:#F5A623; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; color:var(--txt);
+         background:transparent; user-select:none; -webkit-user-select:none; }
+  #wrap { max-width: 900px; margin: 0 auto; }
+  #hud { display:flex; justify-content:space-between; align-items:center; gap:8px; padding:8px 14px;
+         background:var(--card); border:1px solid var(--line); border-radius:12px 12px 0 0; font-weight:700; font-size:15px; }
+  #cb { color:var(--org); min-width:70px; text-align:center; }
+  #prompt { padding:10px 14px; min-height:66px; background:var(--card); border-left:1px solid var(--line);
+            border-right:1px solid var(--line); font-size:16px; line-height:1.35; display:flex; align-items:center; }
+  #prompt.good { color:var(--grn); }
+  #prompt.bad { color:var(--red); }
+  #barwrap { height:6px; background:#0A0E14; border-left:1px solid var(--line); border-right:1px solid var(--line); }
+  #bar { height:100%; width:100%; background:var(--grn); transition: background .3s; }
+  #stage { position:relative; }
+  canvas { display:block; width:100%; height:auto; touch-action:none; cursor:crosshair;
+           background: radial-gradient(ellipse at 50% 0%, #1d2740 0%, #0E1117 75%);
+           border:1px solid var(--line); border-radius:0 0 12px 12px; }
+  #ov { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; padding:14px;
+        text-align:center; pointer-events:none; border-radius:0 0 12px 12px; }
+  #ov.end { background:rgba(10,14,20,.88); justify-content:center; pointer-events:auto; }
+  #ov .mut { color:var(--mut); font-size:14px; }
+  #startbtn { pointer-events:auto; margin-top:auto; padding:10px 28px; border:0; border-radius:999px; cursor:pointer;
+              background:linear-gradient(90deg,#00C48C,#4facfe); color:#fff; font-weight:800; font-size:15px; }
+  .big { font-size:26px; font-weight:800; margin-bottom:8px; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="hud"><span id="qn">Q 0/0</span><span id="sc">Score 0</span><span id="cb"></span><span id="hp"></span></div>
+  <div id="prompt">Loading...</div>
+  <div id="barwrap"><div id="bar"></div></div>
+  <div id="stage">
+    <canvas id="cv" width="900" height="420"></canvas>
+    <div id="ov"><div id="ovt"></div><button id="startbtn">Start</button></div>
+  </div>
+</div>
+
+<script>
+(function () {
+  const cv = document.getElementById("cv"), ctx = cv.getContext("2d");
+  const W = cv.width, H = cv.height, G = 520;
+  const COLORS = ["#e74c3c", "#f39c12", "#27ae60", "#8e44ad", "#2980b9", "#e84393"];
+  const $ = id => document.getElementById(id);
+
+  let cfg = null, qs = [], qi = 0, score = 0, lives = 3, maxLives = 3, combo = 0, bestCombo = 0, correctCount = 0;
+  let state = "idle";            // idle | play | feedback | over
+  let tLeft = 15, limit = 15, sent = false;
+  let fruits = [], pieces = [], parts = [], floats = [], trail = [];
+  let spawnT = 0, spawnList = [], shake = 0, lastPt = null, pressed = false;
+
+  // ---------- Streamlit component protocol ----------
+  function post(m) { window.parent.postMessage(Object.assign({ isStreamlitMessage: true }, m), "*"); }
+  function setH() { post({ type: "streamlit:setFrameHeight", height: document.documentElement.scrollHeight + 4 }); }
+  function sendValue(v) { post({ type: "streamlit:setComponentValue", value: v, dataType: "json" }); }
+  window.addEventListener("message", e => {
+    if (e.data && e.data.type === "streamlit:render" && e.data.args && e.data.args.config) init(e.data.args.config);
+  });
+  post({ type: "streamlit:componentReady", apiVersion: 1 });
+  if (window.ResizeObserver) new ResizeObserver(setH).observe(document.body);
+
+  // ---------- helpers ----------
+  function esc(s) { return String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+  function rnd(a, b) { return a + Math.random() * (b - a); }
+  function shuffle(a) { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; }
+  function setPrompt(t, kind) { const p = $("prompt"); p.textContent = t; p.className = kind || ""; }
+  function updateHud() {
+    $("qn").textContent = state === "idle" ? "Ready" : "Q " + Math.min(qi + 1, qs.length) + "/" + qs.length;
+    $("sc").textContent = "Score " + score;
+    $("cb").textContent = combo >= 2 ? "🔥 x" + combo : "";
+    $("hp").textContent = "❤️".repeat(Math.max(lives, 0)) + "🖤".repeat(Math.max(maxLives - lives, 0));
+  }
+
+  // ---------- game flow ----------
+  function init(c) {
+    if (cfg && cfg.run_id === c.run_id) return;
+    cfg = c; qs = c.questions; limit = c.seconds || 15; maxLives = c.lives || 3;
+    resetGame(); setH();
+  }
+  function resetGame() {
+    score = 0; lives = maxLives; combo = 0; bestCombo = 0; correctCount = 0; qi = 0; state = "idle"; sent = false;
+    fruits = []; pieces = []; parts = []; floats = []; trail = [];
+    $("ov").className = "";
+    $("ovt").innerHTML = '<div style="font-size:20px;font-weight:800">' + esc(cfg.title) + '</div>' +
+      '<div class="mut">' + qs.length + " questions · " + maxLives + " lives · slash the correct answer</div>";
+    $("startbtn").style.display = "";
+    setPrompt("Slash the green fruit (or press Start) to begin. Wrong fruit costs a life!", "");
+    fruits.push({ x: W / 2, y: H * 0.6, vx: 0, vy: 0, r: 74, label: "SLASH TO START", idx: -1, color: "#00C48C", rot: 0, rotv: 0, st: true, t: 0 });
+    updateHud();
+  }
+  function startGame() {
+    if (state !== "idle") return;
+    fruits = []; $("ovt").innerHTML = ""; $("startbtn").style.display = "none";
+    newQ();
+  }
+  $("startbtn").addEventListener("click", startGame);
+
+  function newQ() {
+    state = "play"; tLeft = limit; spawnList = []; spawnT = 0.15; fruits = [];
+    qs[qi].wrong = false;
+    setPrompt(qs[qi].prompt, ""); updateHud();
+  }
+  function feedback(msg, kind, final) {
+    state = "feedback"; setPrompt(msg, kind); updateHud();
+    setTimeout(() => { if (final || qi + 1 >= qs.length) finish(); else { qi++; newQ(); } }, kind === "good" ? 2300 : 3400);
+  }
+  function finish() {
+    state = "over"; updateHud(); fruits = [];
+    const dead = lives <= 0;
+    $("startbtn").style.display = "none";
+    $("ov").className = "end";
+    $("ovt").innerHTML = '<div class="big">' + (dead ? "💔 Game over" : "🏁 Round complete") + "</div>" +
+      '<div style="font-size:20px">Score <b>' + score + "</b></div>" +
+      '<div style="margin-top:6px">' + correctCount + " / " + qs.length + " right on the first try · best combo x" + bestCombo + "</div>" +
+      '<div class="mut" style="margin-top:10px">Scroll down to collect your XP and start a new round.</div>';
+    setPrompt(dead ? "Out of lives!" : "Nice work!", dead ? "bad" : "good");
+    if (!sent) {
+      sent = true;
+      sendValue({ run_id: cfg.run_id, score: score, correct: correctCount, total: qs.length, best_combo: bestCombo, lives_left: Math.max(lives, 0) });
+    }
+    setH();
+  }
+
+  function onSlice(f) {
+    if (f.idx === -1) { startGame(); return; }
+    if (state !== "play") return;
+    const q = qs[qi];
+    if (f.idx === q.answer) {
+      let pts;
+      if (!q.wrong) {
+        combo++; bestCombo = Math.max(bestCombo, combo); correctCount++;
+        pts = 100 + Math.round(50 * tLeft / limit) + Math.min(combo - 1, 9) * 10;
+      } else { pts = 40; combo = 0; }
+      score += pts;
+      floats.push({ x: f.x, y: f.y, txt: "+" + pts, life: 1, color: "#00C48C" });
+      if (combo >= 2) floats.push({ x: f.x, y: f.y - 28, txt: "COMBO x" + combo, life: 1, color: "#F5A623" });
+      feedback("✅ " + q.why, "good", false);
+    } else {
+      q.wrong = true; lives--; combo = 0; shake = 12;
+      floats.push({ x: f.x, y: f.y, txt: "-1 ❤️", life: 1, color: "#FF4B4B" });
+      updateHud();
+      if (lives <= 0) feedback("💔 Out of lives. The answer was: " + q.options[q.answer] + ". " + q.why, "bad", true);
+    }
+    updateHud();
+  }
+
+  function timeUp() {
+    const q = qs[qi]; lives--; combo = 0; shake = 10; fruits = [];
+    updateHud();
+    feedback("⏱ Time's up! The answer was: " + q.options[q.answer] + ". " + q.why, "bad", lives <= 0);
+  }
+
+  // ---------- spawning ----------
+  function spawn(idx) {
+    const label = qs[qi].options[idx];
+    const r = Math.min(76, 40 + Math.sqrt(label.length) * 7);
+    const x = r + Math.random() * (W - 2 * r), apex = H * (0.18 + Math.random() * 0.35);
+    fruits.push({
+      x: x, y: H + r, vy: -Math.sqrt(2 * G * (H + r - apex)),
+      vx: (W / 2 - x) * 0.25 * (0.5 + Math.random()) + (Math.random() - 0.5) * 60,
+      r: r, label: label, idx: idx, color: COLORS[idx % COLORS.length], rot: 0, rotv: (Math.random() - 0.5) * 3
+    });
+  }
+
+  // ---------- slicing ----------
+  function slice(f) {
+    fruits.splice(fruits.indexOf(f), 1);
+    for (let h = 0; h < 2; h++) {
+      pieces.push({ x: f.x, y: f.y, r: f.r, color: f.color, half: h, rot: f.rot + rnd(-0.4, 0.4), rotv: (h ? 1 : -1) * rnd(1.5, 4),
+                    vx: (h ? 1 : -1) * rnd(70, 150) + (f.vx || 0) * 0.4, vy: (f.vy || 0) * 0.3 - rnd(20, 90) });
+    }
+    for (let i = 0; i < 16; i++) parts.push({ x: f.x, y: f.y, vx: rnd(-220, 220), vy: rnd(-260, 80), life: 1, color: f.color });
+    onSlice(f);
+  }
+  function segHit(ax, ay, bx, by, cx, cy, r) {
+    const dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy;
+    let t = l2 ? ((cx - ax) * dx + (cy - ay) * dy) / l2 : 0; t = Math.max(0, Math.min(1, t));
+    const px = ax + t * dx, py = ay + t * dy;
+    return (cx - px) * (cx - px) + (cy - py) * (cy - py) <= r * r;
+  }
+  function pos(e) { const r = cv.getBoundingClientRect(); return { x: (e.clientX - r.left) * W / r.width, y: (e.clientY - r.top) * H / r.height }; }
+  cv.addEventListener("pointerdown", e => { pressed = true; lastPt = pos(e); try { cv.setPointerCapture(e.pointerId); } catch (_) {} });
+  window.addEventListener("pointerup", () => { pressed = false; lastPt = null; });
+  cv.addEventListener("pointerleave", () => { if (!pressed) lastPt = null; });
+  cv.addEventListener("pointermove", e => {
+    const p = pos(e), active = e.pointerType === "mouse" || pressed;
+    if (active && lastPt && Math.hypot(p.x - lastPt.x, p.y - lastPt.y) > 3) {
+      const now = performance.now();
+      if (!trail.length) trail.push({ x: lastPt.x, y: lastPt.y, t: now });
+      trail.push({ x: p.x, y: p.y, t: now });
+      for (const f of fruits.slice()) if (segHit(lastPt.x, lastPt.y, p.x, p.y, f.x, f.y, f.r * 0.92)) slice(f);
+    }
+    lastPt = p;
+  });
+
+  // ---------- update ----------
+  function update(dt) {
+    for (const f of fruits.slice()) {
+      if (f.st) { f.t += dt; f.y = H * 0.6 + Math.sin(f.t * 2.2) * 7; f.rot = Math.sin(f.t) * 0.15; continue; }
+      f.vy += G * dt; f.x += f.vx * dt; f.y += f.vy * dt; f.rot += f.rotv * dt;
+      if (f.x < f.r) { f.x = f.r; f.vx = Math.abs(f.vx); }
+      if (f.x > W - f.r) { f.x = W - f.r; f.vx = -Math.abs(f.vx); }
+      if (f.y > H + f.r + 30 && f.vy > 0) fruits.splice(fruits.indexOf(f), 1);
+    }
+    for (const p of pieces) { p.vy += G * dt; p.x += p.vx * dt; p.y += p.vy * dt; p.rot += p.rotv * dt; }
+    pieces = pieces.filter(p => p.y < H + 120);
+    for (const q of parts) { q.vy += 700 * dt; q.x += q.vx * dt; q.y += q.vy * dt; q.life -= dt * 1.4; }
+    parts = parts.filter(q => q.life > 0);
+    for (const t of floats) { t.y -= 40 * dt; t.life -= dt * 0.7; }
+    floats = floats.filter(t => t.life > 0);
+    shake = Math.max(0, shake - 40 * dt);
+    const now = performance.now(); trail = trail.filter(t => now - t.t < 180);
+
+    if (state === "play") {
+      tLeft -= dt;
+      const frac = Math.max(tLeft / limit, 0);
+      $("bar").style.width = (frac * 100) + "%";
+      $("bar").style.background = frac > 0.5 ? "#00C48C" : (frac > 0.25 ? "#F5A623" : "#FF4B4B");
+      if (tLeft <= 0) { timeUp(); return; }
+      spawnT -= dt;
+      if (spawnT <= 0 && fruits.length < 5) {
+        if (!spawnList.length) spawnList = shuffle(qs[qi].options.map((_, i) => i));
+        spawn(spawnList.pop());
+        spawnT = 0.7 + Math.random() * 0.35;
+      }
+    }
+  }
+
+  // ---------- drawing ----------
+  function wrap(text, maxW) {
+    const words = text.split(" "), lines = []; let cur = "";
+    for (const w of words) {
+      const t = cur ? cur + " " + w : w;
+      if (ctx.measureText(t).width > maxW && cur) { lines.push(cur); cur = w; } else cur = t;
+    }
+    if (cur) lines.push(cur);
+    return lines;
+  }
+  function drawLabel(text, x, y, r) {
+    let size = 16; ctx.font = "800 " + size + "px system-ui,sans-serif";
+    let lines = wrap(text, r * 1.6);
+    if (lines.length > 3) { size = 13; ctx.font = "800 " + size + "px system-ui,sans-serif"; lines = wrap(text, r * 1.7); }
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    const lh = size + 2, y0 = y - (lines.length - 1) * lh / 2;
+    ctx.lineWidth = 4; ctx.strokeStyle = "rgba(0,0,0,.55)"; ctx.fillStyle = "#fff"; ctx.lineJoin = "round";
+    lines.forEach((l, i) => { ctx.strokeText(l, x, y0 + i * lh); ctx.fillText(l, x, y0 + i * lh); });
+  }
+  function drawFruit(f) {
+    ctx.save(); ctx.translate(f.x, f.y); ctx.rotate(f.rot);
+    ctx.fillStyle = f.color; ctx.beginPath(); ctx.arc(0, 0, f.r, 0, Math.PI * 2); ctx.fill();
+    const g = ctx.createRadialGradient(-f.r * 0.35, -f.r * 0.35, f.r * 0.05, 0, 0, f.r);
+    g.addColorStop(0, "rgba(255,255,255,.5)"); g.addColorStop(1, "rgba(255,255,255,0)");
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(0, 0, f.r, 0, Math.PI * 2); ctx.fill();
+    ctx.lineWidth = 3; ctx.strokeStyle = "rgba(255,255,255,.85)"; ctx.stroke();
+    ctx.restore();
+    drawLabel(f.label, f.x, f.y, f.r);
+  }
+  function drawPiece(p) {
+    ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(p.rot);
+    const a0 = p.half ? 0 : Math.PI, a1 = p.half ? Math.PI : Math.PI * 2;
+    ctx.fillStyle = p.color; ctx.beginPath(); ctx.arc(0, 0, p.r, a0, a1); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = "rgba(255,255,255,.55)"; ctx.beginPath(); ctx.arc(0, 0, p.r * 0.78, a0, a1); ctx.closePath(); ctx.fill();
+    ctx.restore();
+  }
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+    ctx.save();
+    if (shake > 0) ctx.translate(rnd(-shake, shake) * 0.5, rnd(-shake, shake) * 0.5);
+    pieces.forEach(drawPiece);
+    fruits.forEach(drawFruit);
+    for (const q of parts) { ctx.globalAlpha = Math.max(q.life, 0); ctx.fillStyle = q.color; ctx.beginPath(); ctx.arc(q.x, q.y, 4, 0, Math.PI * 2); ctx.fill(); }
+    ctx.globalAlpha = 1;
+    for (let i = 1; i < trail.length; i++) {
+      const a = trail[i - 1], b = trail[i], age = (performance.now() - b.t) / 180;
+      ctx.strokeStyle = "rgba(160,220,255," + Math.max(1 - age, 0) + ")"; ctx.lineWidth = 6 * (1 - age) + 1; ctx.lineCap = "round";
+      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+    }
+    ctx.font = "800 24px system-ui,sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    for (const t of floats) { ctx.globalAlpha = Math.max(t.life, 0); ctx.fillStyle = t.color; ctx.strokeStyle = "rgba(0,0,0,.6)"; ctx.lineWidth = 4;
+      ctx.strokeText(t.txt, t.x, t.y); ctx.fillText(t.txt, t.x, t.y); }
+    ctx.globalAlpha = 1;
+    ctx.restore();
+  }
+
+  let last = performance.now();
+  function loop(now) {
+    const dt = Math.min(0.033, (now - last) / 1000); last = now;
+    if (cfg) { update(dt); draw(); }
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
+"""
+
 _ninja_component = None
 
 
 def _get_ninja():
+    """Create the slash-game component. Writes index.html itself, so no extra folder is needed."""
     global _ninja_component
-    if _ninja_component is None and os.path.isdir(_NINJA_DIR):
-        _ninja_component = components.declare_component("riskwise_ninja", path=_NINJA_DIR)
+    if _ninja_component is None:
+        folder = os.path.join(tempfile.gettempdir(), "riskwise_ninja_component")
+        os.makedirs(folder, exist_ok=True)
+        with open(os.path.join(folder, "index.html"), "w", encoding="utf-8") as fh:
+            fh.write(_NINJA_HTML)
+        _ninja_component = components.declare_component("riskwise_ninja", path=folder)
     return _ninja_component
 
 
@@ -474,9 +782,6 @@ def _render_slash(mode):
     st.markdown(f"## {title}")
     st.write(blurb + " Move your mouse (or drag your finger) across the fruit to slash it.")
     comp = _get_ninja()
-    if comp is None:
-        st.error("The `ninja_component` folder is missing. Put it next to games.py (it contains index.html).")
-        return
     st.session_state.setdefault("g_slash", {})
     if mode not in st.session_state.g_slash:
         _new_slash(mode)
