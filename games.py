@@ -9,9 +9,11 @@ Saving progress between visits is the job of the database step (Supabase) later.
 """
 
 import datetime
+import os
 import random
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 # ---------------------------------------------------------------
 # Levels and badges
@@ -34,6 +36,8 @@ BADGES = {
     "bull_bear": ("⚖️", "Both Sides", "Get a perfect score in Bull vs. Bear"),
     "daily": ("📅", "Daily Player", "Complete a daily challenge"),
     "level3": ("🚀", "Associate", "Reach level 3"),
+    "blade": ("🥷", "Blade Runner", "Finish a Slash round with a life to spare"),
+    "combo": ("🔥", "Combo King", "Reach a 5x combo in a Slash game"),
 }
 
 
@@ -402,6 +406,108 @@ def _run_game(gid, title, blurb, n, make_items, render_input, grade, xp_per, on_
 # ---------------------------------------------------------------
 # The tab
 # ---------------------------------------------------------------
+# ---------------------------------------------------------------
+# Slash games (Fruit-Ninja style). The game itself runs in the browser,
+# see the ninja_component/index.html file that sits next to this one.
+# ---------------------------------------------------------------
+SLASH_MODES = {
+    "slash_terms": ("🥷 Term Ninja", "A definition appears. Slash the fruit with the matching finance term!"),
+    "slash_bb": ("🥷 Bull or Bear Ninja", "A fact appears. Slash the fruit for the side it helps: bull or bear."),
+    "slash_val": ("🥷 Valuation Ninja", "A company's numbers appear. Slash the right call: under, fairly, or overvalued."),
+}
+
+_NINJA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ninja_component")
+_ninja_component = None
+
+
+def _get_ninja():
+    global _ninja_component
+    if _ninja_component is None and os.path.isdir(_NINJA_DIR):
+        _ninja_component = components.declare_component("riskwise_ninja", path=_NINJA_DIR)
+    return _ninja_component
+
+
+def _slash_questions(mode, rng):
+    qs = []
+    if mode == "slash_terms":
+        for term, definition in rng.sample(TERMS, 8):
+            others = [t for t, _ in TERMS if t != term]
+            options = rng.sample(others, 3) + [term]
+            rng.shuffle(options)
+            qs.append({
+                "prompt": f"Which term means: {definition}",
+                "options": options, "answer": options.index(term),
+                "why": f"{term}: {definition}",
+            })
+    elif mode == "slash_bb":
+        for text, ans, why in rng.sample(STATEMENTS, 8):
+            options = ["Bull case", "Bear case"]
+            rng.shuffle(options)
+            qs.append({"prompt": text, "options": options, "answer": options.index(ans), "why": why})
+    else:
+        for c in _make_companies(6, rng):
+            truth = "Undervalued" if c["gap"] > 0.15 else ("Overvalued" if c["gap"] < -0.15 else "Fairly valued")
+            options = ["Undervalued", "Fairly valued", "Overvalued"]
+            rng.shuffle(options)
+            prompt = (
+                f"{c['name']} ({c['sector']}): price ${c['price']:,.2f} · FCF {_billions(c['fcf'])} · "
+                f"growth {c['growth']:.1%} · WACC {c['wacc']:.1%} · terminal growth {c['tg']:.1%} · "
+                f"net debt {_billions(c['net_debt'])} · {c['shares'] / 1e9:,.2f}B shares"
+            )
+            why = f"DCF fair value ${c['fair']:,.2f} vs price ${c['price']:,.2f} ({c['gap']:+.0%} gap)."
+            qs.append({"prompt": prompt, "options": options, "answer": options.index(truth), "why": why})
+    return qs
+
+
+def _new_slash(mode):
+    rid = f"{mode}-{random.randrange(10**9)}"
+    rng = random.Random(rid)
+    st.session_state.g_slash[mode] = {
+        "rid": rid, "awarded": False, "res": None, "xp": 0,
+        "cfg": {"title": SLASH_MODES[mode][0], "run_id": rid, "lives": 3, "seconds": 15,
+                "questions": _slash_questions(mode, rng)},
+    }
+
+
+def _render_slash(mode):
+    title, blurb = SLASH_MODES[mode]
+    st.markdown(f"## {title}")
+    st.write(blurb + " Move your mouse (or drag your finger) across the fruit to slash it.")
+    comp = _get_ninja()
+    if comp is None:
+        st.error("The `ninja_component` folder is missing. Put it next to games.py (it contains index.html).")
+        return
+    st.session_state.setdefault("g_slash", {})
+    if mode not in st.session_state.g_slash:
+        _new_slash(mode)
+    cur = st.session_state.g_slash[mode]
+
+    res = comp(config=cur["cfg"], key=f"ninja_{cur['rid']}", default=None)
+
+    if res and res.get("run_id") == cur["rid"] and not cur["awarded"]:
+        cur["awarded"], cur["res"] = True, res
+        correct, total = int(res.get("correct", 0)), int(res.get("total", 1))
+        lives_left = int(res.get("lives_left", 0))
+        cur["xp"] = correct * 8 + (20 if lives_left > 0 else 0) + (25 if correct == total else 0)
+        _add_xp(cur["xp"])
+        _badge("first_game")
+        if lives_left > 0:
+            _badge("blade")
+        if int(res.get("best_combo", 0)) >= 5:
+            _badge("combo")
+        if correct == total:
+            _badge("perfect")
+        st.rerun()
+
+    if cur["awarded"]:
+        r = cur["res"]
+        st.success(
+            f"Round complete! Score **{int(r['score'])}**, **{int(r['correct'])} / {int(r['total'])}** "
+            f"right on the first try, best combo **x{int(r['best_combo'])}**, **+{cur['xp']} XP**"
+        )
+        st.button("🔁 New round", key=f"{mode}_new", type="primary", on_click=_new_slash, args=(mode,))
+
+
 def _header():
     xp = st.session_state.g_xp
     lvl, name, nxt, frac = _level(xp)
@@ -437,6 +543,9 @@ def render_games_tab():
     today = datetime.date.today()
     choices = {
         "📅 Daily challenge": "daily",
+        "🥷 Term Ninja": "slash_terms",
+        "🥷 Bull/Bear Ninja": "slash_bb",
+        "🥷 Valuation Ninja": "slash_val",
         "🔍 Over or Undervalued?": "ou",
         "🎯 Guess the Gap": "gap",
         "📚 Term Match": "terms",
@@ -471,9 +580,11 @@ def render_games_tab():
             "Pick the right meaning for each finance term.",
             6, _term_make, _term_input, _term_grade, 8, on_finish=_fin_terms,
         )
-    else:
+    elif pick == "bb":
         _run_game(
             "bb", "⚖️ Bull vs. Bear",
             "Does each fact help the bull case (reasons to own the stock) or the bear case (reasons to worry)?",
             6, _bb_make, _bb_input, _bb_grade, 8, on_finish=_fin_bb,
         )
+    else:
+        _render_slash(pick)
