@@ -9,6 +9,7 @@ import yfinance as yf
 import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
+from games import render_games_tab
 
 st.set_page_config(page_title="RiskWise DCF", layout="wide")
 st.markdown("""
@@ -637,8 +638,8 @@ def clean_num(value):
         return None
 
 
-tab_overview, tab_learn, tab_risk, tab_sent = st.tabs(
-    ["📊 Overview", "🎓 Learn", "🎲 Risk", "💬 Sentiment"]
+tab_overview, tab_learn, tab_risk, tab_sent, tab_games = st.tabs(
+    ["📊 Overview", "🎓 Learn", "🎲 Risk", "💬 Sentiment","🎮 Games"]
 )
 
 # ===============================================================
@@ -1360,3 +1361,6 @@ This app uses the CAPM figure only (technically the *cost of equity*) to keep th
         else:
             st.error("Not quite. Try moving the WACC slider and watch the fair value.")
 tab_learn.__exit__(None, None, None)
+tab_games.__enter__()
+render_games_tab()
+tab_games.__exit__(None, None, None)
